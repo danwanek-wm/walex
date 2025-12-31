@@ -30,13 +30,13 @@ defmodule WalEx.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:postgrex, "~> 0.20.0"},
+      {:postgrex, "~> 0.21"},
       {:decimal, "~> 2.3.0"},
       {:jason, "~> 1.4"},
       {:timex, "~> 3.7.13"},
 
       # Dev & Test
-      {:ex_doc, "~> 0.38.2", only: :dev, runtime: false},
+      {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:sobelow, "~> 0.14.0", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7.12", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18.5", only: [:dev, :test], runtime: false},
