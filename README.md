@@ -345,6 +345,22 @@ in case the slot is already used `WalEx.Supervisor` will fail to start with a `R
 
 Be warned that there are many additional potential gotchas (a detailed guide is planned).
 
+##### Periodic standby status (`standby_status_interval`)
+
+Postgres asks a replication client for a status update only when `wal_sender_timeout` is greater than `0`, and only after half of that timeout has passed without hearing from the client. If `wal_sender_timeout` is `0` (disabled) it never asks. A client that only answers requests then never reports a flushed position, so the slot's `confirmed_flush_lsn` stays pinned and the database retains WAL indefinitely. This is most visible when the publication covers few tables, because the stream is then mostly keepalives.
+
+Set `standby_status_interval` (milliseconds) and WalEx sends a status update on that schedule, independent of the server:
+
+```elixir
+config :my_app, WalEx,
+  # ...
+  standby_status_interval: 30_000
+```
+
+- Each update reports the latest WAL position the server has told WalEx about.
+- Updates start with the first message of each connection and stop when the connection drops.
+- It is disabled by default. Alert on `OldestReplicationSlotLag` (AWS) or `pg_replication_slots` retained WAL either way.
+
 ##### Connection lifecycle (`on_connect` and telemetry)
 
 Postgres redelivers a slot's unacknowledged transactions whenever the connection comes back, and a reconnect can follow a failover, restore or major upgrade of the database. Code that caches anything about the stream should be told. Define `on_connect` in a module that uses `WalEx.Event`:
