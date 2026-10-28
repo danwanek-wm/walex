@@ -56,6 +56,7 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         standby_timer: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: nil,
+        slot_confirmed_lsn: nil,
         last_wal_end: 0,
         in_txn: false
       }
@@ -80,6 +81,7 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         standby_timer: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: nil,
+        slot_confirmed_lsn: nil,
         last_wal_end: 0,
         in_txn: true
       }
@@ -106,6 +108,7 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         standby_timer: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: nil,
+        slot_confirmed_lsn: nil,
         last_wal_end: 0,
         in_txn: false
       }
@@ -129,11 +132,137 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         standby_timer: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: nil,
+        slot_confirmed_lsn: nil,
         last_wal_end: 0,
         in_txn: false
       }
 
       assert {:noreply, [], %{app_name: ^app}} = Server.handle_data(keepalive(9_999, 0), state)
+    end
+  end
+
+  describe "liveness while a transaction is open and nothing is confirmed" do
+    defp open_txn_state(app, extra \\ []) do
+      Map.merge(
+        %{
+          app_name: app,
+          step: :streaming,
+          slot_name: "ack_slot",
+          publication: "publication",
+          streaming?: true,
+          standby_timer: nil,
+          ack_after_processing: true,
+          standby_status_interval: nil,
+          slot_confirmed_lsn: nil,
+          last_wal_end: 0,
+          in_txn: true
+        },
+        Map.new(extra)
+      )
+    end
+
+    setup do
+      app = app_name("liveness_#{System.unique_integer([:positive])}")
+      start_config!(app, durable_slot: true, ack_after_processing: true)
+      start_supervised!({WalTracker, app_name: app})
+      %{app: app}
+    end
+
+    test "answers a reply request with LSN 0 when the slot position is unknown", %{app: app} do
+      assert {:noreply, messages, _state} =
+               Server.handle_data(keepalive(9_999, 1), open_txn_state(app))
+
+      assert 0 == extract_ack_lsn(messages)
+    end
+
+    test "answers a reply request with the slot's confirmed_flush_lsn when known", %{app: app} do
+      assert {:noreply, messages, _state} =
+               Server.handle_data(
+                 keepalive(9_999, 1),
+                 open_txn_state(app, slot_confirmed_lsn: 4_000)
+               )
+
+      assert 4_000 == extract_ack_lsn(messages)
+    end
+
+    test "never reports below the slot's confirmed_flush_lsn", %{app: app} do
+      WalTracker.update(app, 100)
+
+      assert {:noreply, messages, _state} =
+               Server.handle_data(
+                 keepalive(9_999, 1),
+                 open_txn_state(app, slot_confirmed_lsn: 4_000)
+               )
+
+      assert 4_000 == extract_ack_lsn(messages)
+    end
+
+    test "sends no unsolicited periodic update when nothing is safe to report", %{app: app} do
+      assert {:noreply, [], _state} =
+               Server.handle_info(:standby_status, open_txn_state(app, last_wal_end: 9_999))
+    end
+  end
+
+  describe "reading the slot position at connect" do
+    defp slot_state(app, step) do
+      %{
+        app_name: app,
+        step: step,
+        slot_name: "ack_slot",
+        publication: "publication",
+        durable_slot: true,
+        slot_confirmed_lsn: nil
+      }
+    end
+
+    defp slot_row(active, confirmed) do
+      [
+        %Postgrex.Result{
+          columns: ["active", "confirmed_flush_lsn"],
+          rows: [[active, confirmed]],
+          num_rows: 1
+        }
+      ]
+    end
+
+    test "an existing inactive slot records confirmed_flush_lsn and starts replication" do
+      app = app_name("slot_inactive")
+
+      assert {:stream, _query, [], %{slot_confirmed_lsn: lsn}} =
+               Server.handle_result(slot_row("f", "16/B374D848"), slot_state(app, :slot_exists))
+
+      assert lsn == 0x16 * 0x1_0000_0000 + 0xB374D848
+    end
+
+    test "an existing active slot records confirmed_flush_lsn while it waits" do
+      app = app_name("slot_active")
+
+      assert {:noreply, %{slot_confirmed_lsn: 0x2A}} =
+               Server.handle_result(slot_row("t", "0/2A"), slot_state(app, :slot_exists))
+    end
+
+    test "a NULL or malformed confirmed_flush_lsn is treated as unknown" do
+      app = app_name("slot_null")
+
+      for value <- [nil, "garbage", "0/0"] do
+        assert {:stream, _query, [], %{slot_confirmed_lsn: nil}} =
+                 Server.handle_result(slot_row("f", value), slot_state(app, :slot_exists))
+      end
+    end
+
+    test "a newly created slot records consistent_point" do
+      app = app_name("slot_created")
+
+      result = %Postgrex.Result{
+        columns: ["slot_name", "consistent_point", "snapshot_name", "output_plugin"],
+        rows: [["ack_slot", "1/10", nil, "pgoutput"]],
+        num_rows: 1
+      }
+
+      assert {:stream, _query, [], %{slot_confirmed_lsn: lsn}} =
+               Server.handle_result([result], slot_state(app, :create_slot))
+
+      assert lsn == 0x1_0000_0010
     end
   end
 

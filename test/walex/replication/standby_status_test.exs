@@ -41,7 +41,8 @@ defmodule WalEx.Replication.StandbyStatusTest do
         in_txn: false,
         standby_timer: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
-        standby_status_interval: Config.get_configs(app, :standby_status_interval)
+        standby_status_interval: Config.get_configs(app, :standby_status_interval),
+        slot_confirmed_lsn: nil
       },
       Map.new(extra)
     )

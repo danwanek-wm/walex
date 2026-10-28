@@ -60,7 +60,8 @@ defmodule WalEx.Replication.Server do
       connects: 0,
       last_wal_end: 0,
       in_txn: false,
-      standby_timer: nil
+      standby_timer: nil,
+      slot_confirmed_lsn: nil
     }
 
     Process.flag(:message_queue_data, :off_heap)
@@ -125,9 +126,16 @@ defmodule WalEx.Replication.Server do
 
   @impl true
   def handle_result(
-        [%Postgrex.Result{columns: ["active"], rows: [[active]]}],
+        [
+          %Postgrex.Result{
+            columns: ["active", "confirmed_flush_lsn"],
+            rows: [[active, confirmed]]
+          }
+        ],
         state = %{step: :slot_exists}
       ) do
+    state = %{state | slot_confirmed_lsn: parse_lsn(confirmed)}
+
     case active do
       "f" ->
         Logger.info("Activating inactive replication slot: #{state.slot_name}")
@@ -150,7 +158,8 @@ defmodule WalEx.Replication.Server do
   end
 
   @impl true
-  def handle_result([%Postgrex.Result{} | _results], state = %{step: :create_slot}) do
+  def handle_result(results = [%Postgrex.Result{} | _results], state = %{step: :create_slot}) do
+    state = %{state | slot_confirmed_lsn: consistent_point(results)}
     start_replication_with_retry(state, 0, @initial_backoff)
   end
 
@@ -192,7 +201,7 @@ defmodule WalEx.Replication.Server do
 
     messages =
       case reply do
-        1 -> status_update(state)
+        1 -> requested_status_update(state)
         0 -> []
       end
 
@@ -259,9 +268,19 @@ defmodule WalEx.Replication.Server do
   defp status_update(state) do
     case ack_position(state) do
       nil -> []
-      lsn -> [<<?r, lsn::64, lsn::64, lsn::64, current_time()::64, 0>>]
+      lsn -> [status_message(lsn)]
     end
   end
+
+  # The reply to a keepalive that requested one. Postgres disconnects a client
+  # it has not heard from within wal_sender_timeout, so always answer. When no
+  # position is safe to report, LSN 0 (InvalidXLogRecPtr) keeps the connection
+  # alive without moving the slot.
+  defp requested_status_update(state) do
+    [status_message(ack_position(state) || 0)]
+  end
+
+  defp status_message(lsn), do: <<?r, lsn::64, lsn::64, lsn::64, current_time()::64, 0>>
 
   # The LSN we can safely report as flushed, or nil if there is nothing to say.
   #
@@ -274,6 +293,9 @@ defmodule WalEx.Replication.Server do
   # (from a keepalive, which follows all data it covers) has been fully
   # processed, so it is safe to advance to it. That is what lets a quiet
   # publication advance the slot instead of staying pinned at the last commit.
+  # Inside a transaction with nothing confirmed yet (e.g. after a restart), the
+  # slot's own confirmed_flush_lsn, read at connect, is reported: Postgres
+  # already holds that position, so reporting it is always safe.
   defp ack_position(%{last_wal_end: 0}), do: nil
 
   defp ack_position(
@@ -281,8 +303,8 @@ defmodule WalEx.Replication.Server do
        ) do
     case {state.in_txn, WalTracker.get(app_name)} do
       {false, _confirmed} -> wal_end + 1
-      {true, 0} -> nil
-      {true, confirmed_lsn} -> confirmed_lsn + 1
+      {true, 0} -> state.slot_confirmed_lsn
+      {true, confirmed_lsn} -> max(confirmed_lsn + 1, state.slot_confirmed_lsn || 0)
     end
   end
 
@@ -296,8 +318,43 @@ defmodule WalEx.Replication.Server do
 
   defp reset_stream(state) do
     if state.standby_timer, do: Process.cancel_timer(state.standby_timer)
-    %{state | streaming?: false, last_wal_end: 0, in_txn: false, standby_timer: nil}
+
+    %{
+      state
+      | streaming?: false,
+        last_wal_end: 0,
+        in_txn: false,
+        standby_timer: nil,
+        slot_confirmed_lsn: nil
+    }
   end
+
+  # Text LSN ("16/B374D848") as returned by Postgres, to the 64-bit wire form.
+  # Returns nil for NULL, malformed input, or 0/0.
+  defp parse_lsn(lsn) when is_binary(lsn) do
+    with [high, low] <- String.split(lsn, "/"),
+         {high, ""} <- Integer.parse(high, 16),
+         {low, ""} <- Integer.parse(low, 16),
+         value when value > 0 <- Bitwise.bsl(high, 32) + low do
+      value
+    else
+      _ -> nil
+    end
+  end
+
+  defp parse_lsn(_lsn), do: nil
+
+  # CREATE_REPLICATION_SLOT reports the new slot's confirmed_flush_lsn as
+  # consistent_point.
+  defp consistent_point([%Postgrex.Result{columns: columns, rows: [row | _]} | _])
+       when is_list(columns) do
+    case Enum.find_index(columns, &(&1 == "consistent_point")) do
+      nil -> nil
+      index -> row |> Enum.at(index) |> parse_lsn()
+    end
+  end
+
+  defp consistent_point(_results), do: nil
 
   defp track_transaction(state, %Messages.Begin{}), do: %{state | in_txn: true}
   defp track_transaction(state, %Messages.Commit{}), do: %{state | in_txn: false}

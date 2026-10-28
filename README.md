@@ -365,7 +365,7 @@ With this option enabled:
 
 - WAL messages are processed **synchronously** — each transaction blocks the replication connection until `WalEx.Events` has accepted it.
 - The acknowledged LSN reported to Postgres only advances to positions that have been confirmed, so a crash and reconnect will replay any unacknowledged transactions from the durable slot.
-- If no transaction has been confirmed yet (e.g. on first connect), WalEx falls back to acknowledging Postgres's reported position so the initial handshake completes normally.
+- Between transactions, WalEx acknowledges Postgres's reported position, since everything received so far has been handled. Inside a transaction, it acknowledges only the last handled commit. If nothing has been handled yet (e.g. right after a restart), it reports the slot's own saved position, which WalEx reads when it connects; when that is unknown, it still answers Postgres's keepalive requests, with a position of `0`, so the connection isn't dropped for silence while the slot stays put.
 
 **Important caveats:**
 

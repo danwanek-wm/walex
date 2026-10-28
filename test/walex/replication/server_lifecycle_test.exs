@@ -61,6 +61,7 @@ defmodule WalEx.Replication.ServerLifecycleTest do
         standby_timer: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: Config.get_configs(app, :standby_status_interval),
+        slot_confirmed_lsn: nil,
         message_middleware: fn _message, _app -> :ok end
       },
       Map.new(extra)
