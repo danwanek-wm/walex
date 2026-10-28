@@ -10,6 +10,7 @@ defmodule WalEx.Replication.Server do
   alias WalEx.Config
   alias WalEx.Config.Registry, as: WalExRegistry
   alias WalEx.Decoder
+  alias WalEx.Events.EventModules
   alias WalEx.Replication.QueryBuilder
 
   require Logger
@@ -65,7 +66,7 @@ defmodule WalEx.Replication.Server do
     }
 
     :telemetry.execute([:walex, :replication, :connected], %{}, info)
-    WalEx.Events.EventModules.connected(state.app_name, info)
+    EventModules.connected(state.app_name, info)
 
     query = QueryBuilder.publication_exists(state)
     {:query, query, %{state | step: :publication_exists, connects: state.connects + 1}}
