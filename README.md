@@ -370,6 +370,8 @@ With this option enabled:
 **Important caveats:**
 
 - `ack_after_processing: true` requires `durable_slot: true`. Enabling it on a temporary slot raises a `RuntimeError` at startup, since temporary slots do not retain WAL across reconnects and the guarantee would be meaningless.
+- `ack_after_processing: true` cannot be combined with a custom `message_middleware` and raises a `RuntimeError` at startup if you try. Acknowledgements rely on WalEx handing each message to `WalEx.Replication.Publisher` synchronously, which WalEx cannot verify for a custom middleware.
+- `ack_after_processing` and `standby_status_interval` are read once at startup and cannot be changed with `replace_config/3`.
 - "Acknowledged" means the transaction was dispatched to `WalEx.Events` — not that your downstream I/O (database write, HTTP call, etc.) succeeded. For true end-to-end guarantees, write to a durable queue (Oban, Kafka, SQS, etc.) inside your handler and rely on that system's retry semantics.
 - Postgres enforces a [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html) (default 60 s). If your handlers take longer than this, Postgres will disconnect the replication client. On reconnect with a durable slot, WalEx will resume from the last acknowledged position.
 - Holding back ACKs prevents Postgres from advancing the replication slot's LSN. On busy write workloads this increases WAL retention pressure and can degrade autovacuum performance. Monitor the `oldest_active_logical_replication_slot_xid_age` metric (or its AWS RDS equivalent) if you enable this feature in production.

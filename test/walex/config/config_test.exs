@@ -97,7 +97,7 @@ defmodule WalEx.ConfigTest do
                durable_slot: false,
                ack_after_processing: false,
                standby_status_interval: nil,
-               message_middleware: &Publisher.dispatch/2
+               message_middleware: &Publisher.process_message_async/2
              ] == Config.get_configs(@app_name)
     end
   end
@@ -207,6 +207,14 @@ defmodule WalEx.ConfigTest do
 
       assert "new_password" == Config.get_configs(@app_name)[:password]
     end
+
+    test "should not allow options that are read once at startup" do
+      for key <- [:ack_after_processing, :standby_status_interval] do
+        assert_raise FunctionClauseError, fn ->
+          Config.replace_config(@app_name, key, true)
+        end
+      end
+    end
   end
 
   # # Need to find a way to load the MyApp.Events.Subscriptions
@@ -276,6 +284,44 @@ defmodule WalEx.ConfigTest do
       assert_raise RuntimeError,
                    "ack_after_processing requires durable_slot: true — temporary slots do not retain WAL on reconnect",
                    fn -> Config.start_link(configs: configs) end
+    end
+
+    test "should raise when ack_after_processing is combined with a custom message_middleware" do
+      configs =
+        @base_configs
+        |> Keyword.put(:name, :bad_ack_app3)
+        |> Keyword.put(:durable_slot, true)
+        |> Keyword.put(:ack_after_processing, true)
+        |> Keyword.put(:message_middleware, fn _message, _app -> :ok end)
+
+      assert_raise RuntimeError, ~r/cannot be combined with a custom message_middleware/, fn ->
+        Config.start_link(configs: configs)
+      end
+    end
+
+    test "should default message_middleware to synchronous processing" do
+      configs =
+        @base_configs
+        |> Keyword.put(:name, :ack_sync_app)
+        |> Keyword.put(:durable_slot, true)
+        |> Keyword.put(:ack_after_processing, true)
+
+      {:ok, _pid} = Config.start_link(configs: configs)
+
+      assert (&Publisher.process_message_sync/2) ==
+               Config.get_configs(:ack_sync_app, :message_middleware)
+    end
+
+    test "should keep a custom message_middleware when ack_after_processing is false" do
+      middleware = fn _message, _app -> :ok end
+
+      configs =
+        @base_configs
+        |> Keyword.put(:name, :custom_middleware_app)
+        |> Keyword.put(:message_middleware, middleware)
+
+      {:ok, _pid} = Config.start_link(configs: configs)
+      assert middleware == Config.get_configs(:custom_middleware_app, :message_middleware)
     end
   end
 

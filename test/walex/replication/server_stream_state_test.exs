@@ -48,6 +48,8 @@ defmodule WalEx.Replication.ServerStreamStateTest do
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
+        ack_after_processing: Config.get_configs(app, :ack_after_processing),
+        standby_status_interval: Config.get_configs(app, :standby_status_interval),
         message_middleware: fn _message, _app -> :ok end
       },
       Map.new(extra)

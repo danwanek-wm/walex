@@ -34,13 +34,17 @@ defmodule WalEx.Replication.Server do
       slot_name: slot_name,
       publication: publication,
       durable_slot: durable_slot,
-      message_middleware: message_middleware
+      message_middleware: message_middleware,
+      ack_after_processing: ack_after_processing,
+      standby_status_interval: standby_status_interval
     ] =
       Config.get_configs(app_name, [
         :slot_name,
         :publication,
         :durable_slot,
-        :message_middleware
+        :message_middleware,
+        :ack_after_processing,
+        :standby_status_interval
       ])
 
     state = %{
@@ -50,6 +54,8 @@ defmodule WalEx.Replication.Server do
       publication: publication,
       durable_slot: durable_slot,
       message_middleware: message_middleware,
+      ack_after_processing: ack_after_processing,
+      standby_status_interval: standby_status_interval,
       streaming?: false,
       connects: 0,
       last_wal_end: 0,
@@ -270,17 +276,17 @@ defmodule WalEx.Replication.Server do
   # publication advance the slot instead of staying pinned at the last commit.
   defp ack_position(%{last_wal_end: 0}), do: nil
 
-  defp ack_position(state = %{app_name: app_name, last_wal_end: wal_end}) do
-    if WalEx.Config.get_configs(app_name, :ack_after_processing) do
-      case {Map.get(state, :in_txn, false), WalTracker.get(app_name)} do
-        {false, _confirmed} -> wal_end + 1
-        {true, 0} -> nil
-        {true, confirmed_lsn} -> confirmed_lsn + 1
-      end
-    else
-      wal_end + 1
+  defp ack_position(
+         state = %{ack_after_processing: true, app_name: app_name, last_wal_end: wal_end}
+       ) do
+    case {state.in_txn, WalTracker.get(app_name)} do
+      {false, _confirmed} -> wal_end + 1
+      {true, 0} -> nil
+      {true, confirmed_lsn} -> confirmed_lsn + 1
     end
   end
+
+  defp ack_position(%{last_wal_end: wal_end}), do: wal_end + 1
 
   # Postgrex calls handle_result/2 for queries only, never after a successful
   # START_REPLICATION, so the first replication message is the signal that the
@@ -297,14 +303,9 @@ defmodule WalEx.Replication.Server do
   defp track_transaction(state, %Messages.Commit{}), do: %{state | in_txn: false}
   defp track_transaction(state, _message), do: state
 
-  defp schedule_standby_status(state = %{standby_timer: nil, app_name: app_name}) do
-    case WalEx.Config.get_configs(app_name, :standby_status_interval) do
-      interval when is_integer(interval) and interval > 0 ->
-        %{state | standby_timer: Process.send_after(self(), :standby_status, interval)}
-
-      _ ->
-        state
-    end
+  defp schedule_standby_status(state = %{standby_timer: nil, standby_status_interval: interval})
+       when is_integer(interval) and interval > 0 do
+    %{state | standby_timer: Process.send_after(self(), :standby_status, interval)}
   end
 
   defp schedule_standby_status(state), do: state

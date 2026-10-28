@@ -34,7 +34,15 @@ defmodule WalEx.Replication.StandbyStatusTest do
 
   defp state(app, extra \\ []) do
     Map.merge(
-      %{app_name: app, streaming?: true, last_wal_end: 0, in_txn: false, standby_timer: nil},
+      %{
+        app_name: app,
+        streaming?: true,
+        last_wal_end: 0,
+        in_txn: false,
+        standby_timer: nil,
+        ack_after_processing: Config.get_configs(app, :ack_after_processing),
+        standby_status_interval: Config.get_configs(app, :standby_status_interval)
+      },
       Map.new(extra)
     )
   end

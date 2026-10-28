@@ -54,6 +54,8 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         app_name: app,
         streaming?: false,
         standby_timer: nil,
+        ack_after_processing: Config.get_configs(app, :ack_after_processing),
+        standby_status_interval: nil,
         last_wal_end: 0,
         in_txn: false
       }
@@ -76,6 +78,8 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         app_name: app,
         streaming?: false,
         standby_timer: nil,
+        ack_after_processing: Config.get_configs(app, :ack_after_processing),
+        standby_status_interval: nil,
         last_wal_end: 0,
         in_txn: true
       }
@@ -100,6 +104,8 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         app_name: app,
         streaming?: false,
         standby_timer: nil,
+        ack_after_processing: Config.get_configs(app, :ack_after_processing),
+        standby_status_interval: nil,
         last_wal_end: 0,
         in_txn: false
       }
@@ -121,6 +127,8 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         app_name: app,
         streaming?: false,
         standby_timer: nil,
+        ack_after_processing: Config.get_configs(app, :ack_after_processing),
+        standby_status_interval: nil,
         last_wal_end: 0,
         in_txn: false
       }
@@ -163,15 +171,15 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
       assert 0 == WalTracker.get(app)
 
       # BEGIN alone must not advance the tracker
-      :ok = Publisher.dispatch(begin_msg, app)
+      :ok = Publisher.process_message_sync(begin_msg, app)
       assert 0 == WalTracker.get(app)
 
       # A COMMIT whose LSN does not match the open transaction must not advance the tracker
-      :ok = Publisher.dispatch(commit_other_lsn, app)
+      :ok = Publisher.process_message_sync(commit_other_lsn, app)
       assert 0 == WalTracker.get(app)
 
       # The matching COMMIT must advance the tracker to the encoded LSN
-      :ok = Publisher.dispatch(commit_same_lsn, app)
+      :ok = Publisher.process_message_sync(commit_same_lsn, app)
       assert encode_lsn(lsn) == WalTracker.get(app)
     end
 
@@ -188,13 +196,13 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
       lsn = {1, 1}
 
       :ok =
-        Publisher.dispatch(
+        Publisher.process_message_sync(
           %Messages.Begin{final_lsn: lsn, commit_timestamp: ts, xid: 99},
           app
         )
 
       :ok =
-        Publisher.dispatch(
+        Publisher.process_message_sync(
           %Messages.Commit{flags: [], lsn: lsn, end_lsn: lsn, commit_timestamp: ts},
           app
         )

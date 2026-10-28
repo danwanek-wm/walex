@@ -12,7 +12,7 @@ defmodule WalEx.Config do
   alias WalEx.Config.Registry, as: WalExRegistry
   alias WalEx.Replication.Publisher
 
-  @allowed_config_value ~w(database hostname name password port publication username webhook_signing_secret slot_name durable_slot message_middleware ack_after_processing standby_status_interval)a
+  @allowed_config_value ~w(database hostname name password port publication username webhook_signing_secret slot_name durable_slot message_middleware)a
   @allowed_config_values ~w(modules subscriptions)a
 
   @type start_opts :: [
@@ -146,6 +146,7 @@ defmodule WalEx.Config do
     subscriptions = Keyword.get(configs, :subscriptions, [])
     modules = Keyword.get(configs, :modules, [])
     module_names = build_module_names(name, modules, subscriptions)
+    ack_after_processing = parse_ack_after_processing(configs)
 
     [
       name: name,
@@ -164,9 +165,11 @@ defmodule WalEx.Config do
       event_relay: Keyword.get(configs, :event_relay),
       slot_name: Keyword.get(configs, :slot_name) |> parse_slot_name(name),
       durable_slot: Keyword.get(configs, :durable_slot, false) == true,
-      ack_after_processing: parse_ack_after_processing(configs),
+      ack_after_processing: ack_after_processing,
       standby_status_interval: parse_standby_status_interval(configs),
-      message_middleware: Keyword.get(configs, :message_middleware) |> parse_message_middleware()
+      message_middleware:
+        Keyword.get(configs, :message_middleware)
+        |> parse_message_middleware(ack_after_processing)
     ]
   end
 
@@ -276,12 +279,19 @@ defmodule WalEx.Config do
   defp parse_ack_after_processing(configs) do
     durable_slot = Keyword.get(configs, :durable_slot, false) == true
     ack_after_processing = Keyword.get(configs, :ack_after_processing, false) == true
+    custom_middleware = not is_nil(Keyword.get(configs, :message_middleware))
 
-    if ack_after_processing and not durable_slot do
-      raise "ack_after_processing requires durable_slot: true — temporary slots do not retain WAL on reconnect"
+    cond do
+      ack_after_processing and not durable_slot ->
+        raise "ack_after_processing requires durable_slot: true — temporary slots do not retain WAL on reconnect"
+
+      ack_after_processing and custom_middleware ->
+        raise "ack_after_processing cannot be combined with a custom message_middleware — " <>
+                "acknowledgements assume WalEx dispatches each message synchronously"
+
+      true ->
+        ack_after_processing
     end
-
-    ack_after_processing
   end
 
   defp parse_standby_status_interval(configs) do
@@ -297,10 +307,12 @@ defmodule WalEx.Config do
     end
   end
 
-  defp parse_message_middleware(message_middleware) when is_function(message_middleware, 2),
-    do: message_middleware
+  defp parse_message_middleware(message_middleware, _ack_after_processing)
+       when is_function(message_middleware, 2),
+       do: message_middleware
 
-  defp parse_message_middleware(nil), do: &Publisher.dispatch/2
+  defp parse_message_middleware(nil, true), do: &Publisher.process_message_sync/2
+  defp parse_message_middleware(nil, false), do: &Publisher.process_message_async/2
 
   defp set_url_opts(username, password, database, info) do
     url_opts = [
