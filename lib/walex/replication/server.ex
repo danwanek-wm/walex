@@ -77,7 +77,7 @@ defmodule WalEx.Replication.Server do
       reconnect?: Config.record_connection(state.app_name) > 0
     }
 
-    :telemetry.execute([:walex, :replication, :connected], %{}, info)
+    :telemetry.execute([:walex, :replication, :connected], measurements(), info)
     EventModules.connected(state.app_name, info)
 
     query = QueryBuilder.publication_exists(state)
@@ -87,7 +87,7 @@ defmodule WalEx.Replication.Server do
 
   @impl true
   def handle_disconnect(state) do
-    :telemetry.execute([:walex, :replication, :disconnected], %{}, %{
+    :telemetry.execute([:walex, :replication, :disconnected], measurements(), %{
       app_name: state.app_name,
       slot_name: state.slot_name
     })
@@ -314,7 +314,17 @@ defmodule WalEx.Replication.Server do
   # START_REPLICATION, so the first replication message is the signal that the
   # stream is up. Status updates may only be sent from then on.
   defp mark_streaming(state = %{streaming?: true}), do: state
-  defp mark_streaming(state), do: schedule_standby_status(%{state | streaming?: true})
+
+  defp mark_streaming(state) do
+    :telemetry.execute([:walex, :replication, :streaming], measurements(), %{
+      app_name: state.app_name,
+      slot_name: state.slot_name
+    })
+
+    schedule_standby_status(%{state | streaming?: true})
+  end
+
+  defp measurements, do: %{system_time: System.system_time()}
 
   defp reset_stream(state) do
     if state.standby_timer, do: Process.cancel_timer(state.standby_timer)

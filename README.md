@@ -409,9 +409,18 @@ defmodule MyApp.Events do
 end
 ```
 
-The block runs on every connection, including the first (`reconnect?: false`), before replication starts. `reconnect?` is `false` only for the first connection since the WalEx instance started; it stays `true` when WalEx's replication processes restart after a crash, since Postgres redelivers in that case too. It runs in `WalEx.Events.EventModules`, not in the connection process, so it cannot delay replication, and an error raised in it is logged and ignored.
+The block runs on every connection, including the first (`reconnect?: false`). `reconnect?` is `false` only for the first connection since the WalEx instance started; it stays `true` when WalEx's replication processes restart after a crash, since Postgres redelivers in that case too. An error raised in the block is logged and ignored.
 
-The same moments are published as telemetry events, with the app and slot name as metadata, for monitoring: `[:walex, :replication, :connected]` (also carrying `reconnect?`) and `[:walex, :replication, :disconnected]`.
+The block runs asynchronously in `WalEx.Events.EventModules`, the same process that runs your event handlers:
+
+- It is queued as soon as the connection opens, so it runs before any transaction from the new connection reaches your handlers. Transactions that the previous connection had already queued may still be handled after it.
+- It doesn't hold up the connection itself, but a slow hook does delay event processing. With `ack_after_processing: true` that also holds up the replication stream, which waits for each transaction to be handled.
+
+Connection lifecycle telemetry events carry the app and slot name as metadata and a `system_time` measurement:
+
+- `[:walex, :replication, :connected]`, also carrying `reconnect?`. It fires as soon as the network connection to Postgres opens, *before* WalEx checks the publication and acquires the slot (which may wait while another client holds the slot). It does not mean changes are flowing yet.
+- `[:walex, :replication, :streaming]` fires on the first replication message of a connection, i.e. once the slot is acquired and Postgres is streaming.
+- `[:walex, :replication, :disconnected]` fires when the connection drops.
 
 ##### Event handler telemetry
 

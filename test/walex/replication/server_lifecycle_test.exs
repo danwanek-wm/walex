@@ -100,7 +100,7 @@ defmodule WalEx.Replication.ServerLifecycleTest do
 
       {:query, _q, after_first} = Server.handle_connect(state(:lifecycle_app))
 
-      assert_receive {:telemetry, [:walex, :replication, :connected], %{},
+      assert_receive {:telemetry, [:walex, :replication, :connected], %{system_time: _},
                       %{app_name: :lifecycle_app, slot_name: "lifecycle_slot", reconnect?: false}}
 
       {:query, _q, _} = Server.handle_connect(after_first)
@@ -138,6 +138,22 @@ defmodule WalEx.Replication.ServerLifecycleTest do
     end
   end
 
+  describe "handle_data/2" do
+    test "emits a streaming event on the first replication message only" do
+      start_config!(:lifecycle_app)
+      attach([[:walex, :replication, :streaming]])
+      keepalive = <<?k, 10::64, 0::64, 0::8>>
+
+      {:noreply, [], streaming} = Server.handle_data(keepalive, state(:lifecycle_app))
+
+      assert_receive {:telemetry, [:walex, :replication, :streaming], %{system_time: _},
+                      %{app_name: :lifecycle_app, slot_name: "lifecycle_slot"}}
+
+      {:noreply, [], _} = Server.handle_data(keepalive, streaming)
+      refute_receive {:telemetry, [:walex, :replication, :streaming], _, _}
+    end
+  end
+
   describe "handle_disconnect/1" do
     test "emits a disconnected event" do
       start_config!(:lifecycle_app)
@@ -146,7 +162,7 @@ defmodule WalEx.Replication.ServerLifecycleTest do
       assert {:noreply, %{step: :disconnected}} =
                Server.handle_disconnect(state(:lifecycle_app, step: {:streaming, 0}))
 
-      assert_receive {:telemetry, [:walex, :replication, :disconnected], %{},
+      assert_receive {:telemetry, [:walex, :replication, :disconnected], %{system_time: _},
                       %{app_name: :lifecycle_app, slot_name: "lifecycle_slot"}}
     end
   end

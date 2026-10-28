@@ -51,15 +51,21 @@ defmodule WalEx.Event.Dsl do
   replication connection is (re)established.
 
   The block receives `%{app_name: atom, slot_name: String.t(), reconnect?: boolean}`.
-  It runs before replication restarts, so it is the place to reset anything that
-  assumes an uninterrupted stream: Postgres redelivers every transaction after
-  the slot's last acknowledged position, and a reconnect can follow a restore or
-  upgrade of the database. `reconnect?` is `false` only for the first connection
-  since this WalEx instance started; it stays `true` after the replication
-  processes restart following a crash.
+  It is the place to reset anything that assumes an uninterrupted stream:
+  Postgres redelivers every transaction after the slot's last acknowledged
+  position, and a reconnect can follow a restore or upgrade of the database.
+  `reconnect?` is `false` only for the first connection since this WalEx
+  instance started; it stays `true` after the replication processes restart
+  following a crash.
 
-  The block runs in `WalEx.Events.EventModules`, not in the connection process, so
-  it cannot delay replication. A raised error is logged and otherwise ignored.
+  The block runs asynchronously in `WalEx.Events.EventModules`, the process
+  that also runs the event handlers, and a raised error is logged and otherwise
+  ignored. It is queued as soon as the connection opens, so it runs before any
+  transaction from the new connection reaches the handlers. Transactions the
+  previous connection had already queued may still be handled after it.
+  The hook doesn't hold up the connection itself, but a slow hook does delay
+  event processing, and with `ack_after_processing: true` that also holds up
+  the replication stream, which waits for each transaction to be handled.
 
       on_connect(fn %{reconnect?: reconnect?} ->
         MyApp.Cache.invalidate(reconnect?)
