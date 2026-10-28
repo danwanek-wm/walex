@@ -55,7 +55,6 @@ defmodule WalEx.Replication.ServerLifecycleTest do
         slot_name: "lifecycle_slot",
         publication: "publication",
         streaming?: false,
-        connects: 0,
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
@@ -88,7 +87,7 @@ defmodule WalEx.Replication.ServerLifecycleTest do
     test "starts the connection sequence" do
       start_config!(:lifecycle_app)
 
-      assert {:query, query, %{step: :publication_exists, connects: 1}} =
+      assert {:query, query, %{step: :publication_exists}} =
                Server.handle_connect(state(:lifecycle_app))
 
       assert is_binary(IO.iodata_to_binary(query))
@@ -105,6 +104,18 @@ defmodule WalEx.Replication.ServerLifecycleTest do
 
       {:query, _q, _} = Server.handle_connect(after_first)
 
+      assert_receive {:telemetry, [:walex, :replication, :connected], %{}, %{reconnect?: true}}
+    end
+
+    test "flags a reconnect after the replication processes restart" do
+      start_config!(:lifecycle_app)
+      attach([[:walex, :replication, :connected]])
+
+      {:query, _q, _} = Server.handle_connect(state(:lifecycle_app))
+      assert_receive {:telemetry, [:walex, :replication, :connected], %{}, %{reconnect?: false}}
+
+      # A crash restarts Server with a brand-new state; the count must survive.
+      {:query, _q, _} = Server.handle_connect(state(:lifecycle_app))
       assert_receive {:telemetry, [:walex, :replication, :connected], %{}, %{reconnect?: true}}
     end
 

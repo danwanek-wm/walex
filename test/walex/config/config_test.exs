@@ -217,6 +217,16 @@ defmodule WalEx.ConfigTest do
     end
   end
 
+  describe "record_connection/1" do
+    test "returns the number of earlier connections" do
+      {:ok, _pid} = Config.start_link(configs: @base_configs)
+
+      assert 0 == Config.record_connection(@app_name)
+      assert 1 == Config.record_connection(@app_name)
+      assert 2 == Config.record_connection(@app_name)
+    end
+  end
+
   # # Need to find a way to load the MyApp.Events.Subscriptions
   # describe "build_module_names/3" do
   #   setup do

@@ -44,7 +44,6 @@ defmodule WalEx.Replication.ServerStreamStateTest do
         slot_name: "lifecycle_slot",
         publication: "publication",
         streaming?: false,
-        connects: 0,
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
@@ -86,8 +85,7 @@ defmodule WalEx.Replication.ServerStreamStateTest do
           last_wal_end: 99,
           in_txn: true,
           standby_timer: timer,
-          slot_confirmed_lsn: 1_234,
-          connects: 1
+          slot_confirmed_lsn: 1_234
         )
 
       assert {:query, _query, fresh} = Server.handle_connect(stale)

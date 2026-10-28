@@ -407,7 +407,7 @@ defmodule MyApp.Events do
 end
 ```
 
-The block runs on every connection, including the first (`reconnect?: false`), before replication starts. It runs in `WalEx.Events.EventModules`, not in the connection process, so it cannot delay replication, and an error raised in it is logged and ignored.
+The block runs on every connection, including the first (`reconnect?: false`), before replication starts. `reconnect?` is `false` only for the first connection since the WalEx instance started; it stays `true` when WalEx's replication processes restart after a crash, since Postgres redelivers in that case too. It runs in `WalEx.Events.EventModules`, not in the connection process, so it cannot delay replication, and an error raised in it is logged and ignored.
 
 The same moments are published as telemetry events, with the app and slot name as metadata, for monitoring: `[:walex, :replication, :connected]` (also carrying `reconnect?`) and `[:walex, :replication, :disconnected]`.
 

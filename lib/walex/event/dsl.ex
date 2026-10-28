@@ -54,7 +54,9 @@ defmodule WalEx.Event.Dsl do
   It runs before replication restarts, so it is the place to reset anything that
   assumes an uninterrupted stream: Postgres redelivers every transaction after
   the slot's last acknowledged position, and a reconnect can follow a restore or
-  upgrade of the database. `reconnect?` is `false` for the first connection.
+  upgrade of the database. `reconnect?` is `false` only for the first connection
+  since this WalEx instance started; it stays `true` after the replication
+  processes restart following a crash.
 
   The block runs in `WalEx.Events.EventModules`, not in the connection process, so
   it cannot delay replication. A raised error is logged and otherwise ignored.

@@ -57,7 +57,6 @@ defmodule WalEx.Replication.Server do
       ack_after_processing: ack_after_processing,
       standby_status_interval: standby_status_interval,
       streaming?: false,
-      connects: 0,
       last_wal_end: 0,
       in_txn: false,
       standby_timer: nil,
@@ -74,7 +73,7 @@ defmodule WalEx.Replication.Server do
     info = %{
       app_name: state.app_name,
       slot_name: state.slot_name,
-      reconnect?: state.connects > 0
+      reconnect?: Config.record_connection(state.app_name) > 0
     }
 
     :telemetry.execute([:walex, :replication, :connected], %{}, info)
@@ -82,8 +81,7 @@ defmodule WalEx.Replication.Server do
 
     query = QueryBuilder.publication_exists(state)
 
-    {:query, query,
-     %{reset_stream(state) | step: :publication_exists, connects: state.connects + 1}}
+    {:query, query, %{reset_stream(state) | step: :publication_exists}}
   end
 
   @impl true

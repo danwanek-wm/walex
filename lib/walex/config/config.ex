@@ -90,6 +90,22 @@ defmodule WalEx.Config do
   def get_event_modules(app_name), do: get_configs(app_name, :modules)
 
   @doc """
+  Records a replication connection for `app_name` and returns how many
+  connections were recorded before this one.
+
+  The count lives in this agent rather than in `WalEx.Replication.Server`
+  because the replication processes are restarted together after a crash,
+  and a restart must still be reported as a reconnect.
+  """
+  @spec record_connection(atom()) :: non_neg_integer()
+  def record_connection(app_name) do
+    Agent.get_and_update(set_agent(app_name), fn config ->
+      previous = Keyword.get(config, :connection_count, 0)
+      {previous, Keyword.put(config, :connection_count, previous + 1)}
+    end)
+  end
+
+  @doc """
   Appends one or more values to a multi-valued config key
   (`:modules` or `:subscriptions`). Duplicates are removed.
   """
