@@ -26,6 +26,44 @@ defmodule WalEx.Support.TestHelpers do
     find_child_pid(supervisor_pid, DBConnection.ConnectionPool)
   end
 
+  @pg_installations [
+    linux: "/usr/lib/postgresql",
+    mac_homebrew: "/usr/local/Cellar/postgresql",
+    mac_apple_silicon_homebrew: "/opt/homebrew/Cellar/postgresql",
+    mac_app: "/Applications/Postgres.app/Contents/Versions"
+  ]
+
+  @doc "The local PostgreSQL installation type, or nil when none is found."
+  def pg_installation_type do
+    Enum.find_value(@pg_installations, fn {type, path} -> File.exists?(path) && type end)
+  end
+
+  @doc "The base path of a local PostgreSQL installation type."
+  def pg_installation_path(type), do: Keyword.fetch!(@pg_installations, type)
+
+  @doc """
+  How the database-restart test can restart Postgres: `:docker` when the
+  `docker-compose.dbs.yml` `db` service is running, `:system` when a local
+  installation is found, otherwise nil.
+
+  `docker compose ps` exits 0 even when the service isn't running, so ask for
+  running containers only and check that one is listed.
+  """
+  def pg_restart_method do
+    cond do
+      docker_compose_db_running?() -> :docker
+      pg_installation_type() -> :system
+      true -> nil
+    end
+  end
+
+  defp docker_compose_db_running? do
+    case System.shell("docker compose -f docker-compose.dbs.yml ps --status running --quiet db") do
+      {output, 0} -> String.trim(output) != ""
+      _ -> false
+    end
+  end
+
   def start_walex_supervised(configs, supervisor \\ WalEx.Supervisor) do
     ExUnit.Callbacks.start_supervised(%{
       id: make_ref(),

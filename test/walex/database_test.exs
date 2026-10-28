@@ -143,6 +143,7 @@ defmodule WalEx.DatabaseTest do
       end)
     end
 
+    @tag :pg_restart
     test "should re-initiate after database restart" do
       capture_log(fn ->
         assert {:ok, supervisor_pid} = start_walex_supervised(@base_configs, TestSupervisor)
@@ -226,25 +227,15 @@ defmodule WalEx.DatabaseTest do
     end
   end
 
-  @linux_path "/usr/lib/postgresql"
-  @mac_homebrew_path "/usr/local/Cellar/postgresql"
-  @mac_apple_silicon_homebrew_path "/opt/homebrew/Cellar/postgresql"
-  @mac_app_path "/Applications/Postgres.app/Contents/Versions"
-
   def pg_restart do
-    if uses_docker_compose() do
-      Logger.debug("Restarting docker postgres.")
-      pg_restart(:docker)
-    else
-      Logger.debug("Restarting system postgres.")
-      pg_restart(:system)
-    end
-  end
+    case pg_restart_method() do
+      :docker ->
+        Logger.debug("Restarting docker postgres.")
+        pg_restart(:docker)
 
-  def uses_docker_compose do
-    case(System.shell("docker compose -f docker-compose.dbs.yml ps db")) do
-      {_, 0} -> true
-      _ -> false
+      :system ->
+        Logger.debug("Restarting system postgres.")
+        pg_restart(:system)
     end
   end
 
@@ -277,42 +268,14 @@ defmodule WalEx.DatabaseTest do
     end
   end
 
-  defp pg_installation_type do
-    cond do
-      File.exists?(@linux_path) ->
-        :linux
-
-      File.exists?(@mac_homebrew_path) ->
-        :mac_homebrew
-
-      File.exists?(@mac_apple_silicon_homebrew_path) ->
-        :mac_apple_silicon_homebrew
-
-      File.exists?(@mac_app_path) ->
-        :mac_app
-    end
-  end
-
   defp pg_ctl_path do
     case pg_installation_type() do
-      :linux ->
-        Logger.debug("PostgreSQL installed via Linux.")
-        @linux_path
-
-      :mac_homebrew ->
-        Logger.debug("PostgreSQL installed via homebrew.")
-        @mac_homebrew_path
-
-      :mac_apple_silicon_homebrew ->
-        Logger.debug("PostgreSQL installed via apple silicon homebrew.")
-        @mac_apple_silicon_homebrew_path
-
-      :mac_app ->
-        Logger.debug("PostgreSQL installed via Postgres.app.")
-        @mac_app_path
-
-      _ ->
+      nil ->
         raise "PostgreSQL not installed via Postgres.app or homebrew."
+
+      type ->
+        Logger.debug("PostgreSQL installation detected: #{type}.")
+        pg_installation_path(type)
     end
   end
 
