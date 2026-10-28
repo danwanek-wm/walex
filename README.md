@@ -373,6 +373,8 @@ With this option enabled:
 - `ack_after_processing: true` cannot be combined with a custom `message_middleware` and raises a `RuntimeError` at startup if you try. Acknowledgements rely on WalEx handing each message to `WalEx.Replication.Publisher` synchronously, which WalEx cannot verify for a custom middleware.
 - `ack_after_processing` and `standby_status_interval` are read once at startup and cannot be changed with `replace_config/3`.
 - "Acknowledged" means the transaction was dispatched to `WalEx.Events` — not that your downstream I/O (database write, HTTP call, etc.) succeeded. For true end-to-end guarantees, write to a durable queue (Oban, Kafka, SQS, etc.) inside your handler and rely on that system's retry semantics.
+- Only the `on_event` / `on_insert` / `on_update` / `on_delete` block itself is covered. Functions passed in the `functions` list (e.g. `on_insert(:user, %{}, [{MyApp.Mailer, :welcome}], fn ... end)`) run in separate, unsupervised `Task`s; WalEx does not wait for them, and their failures are not retried.
+- A handler that raises crashes the replication processes, and the same transaction is replayed when they restart. A transaction that **always** fails ("poison pill") is therefore replayed again and again. Either it loops indefinitely, or, if it fails more than 10 times within 5 seconds, the replication supervisor gives up. In both cases replication makes no progress and Postgres keeps retaining WAL until it is fixed. Rescue errors you can tolerate inside the handler, or send the failing events to a dead-letter queue, and alert on the `[:walex, :event_handler, :exception]` telemetry event (see below).
 - Postgres enforces a [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html) (default 60 s). If your handlers take longer than this, Postgres will disconnect the replication client. On reconnect with a durable slot, WalEx will resume from the last acknowledged position.
 - Holding back ACKs prevents Postgres from advancing the replication slot's LSN. On busy write workloads this increases WAL retention pressure and can degrade autovacuum performance. Monitor the `oldest_active_logical_replication_slot_xid_age` metric (or its AWS RDS equivalent) if you enable this feature in production.
 
@@ -410,6 +412,14 @@ end
 The block runs on every connection, including the first (`reconnect?: false`), before replication starts. `reconnect?` is `false` only for the first connection since the WalEx instance started; it stays `true` when WalEx's replication processes restart after a crash, since Postgres redelivers in that case too. It runs in `WalEx.Events.EventModules`, not in the connection process, so it cannot delay replication, and an error raised in it is logged and ignored.
 
 The same moments are published as telemetry events, with the app and slot name as metadata, for monitoring: `[:walex, :replication, :connected]` (also carrying `reconnect?`) and `[:walex, :replication, :disconnected]`.
+
+##### Event handler telemetry
+
+Each call into an event module's handler (`process_all`, `process_insert`, `process_update`, `process_delete`) is a [telemetry span](https://hexdocs.pm/telemetry/telemetry.html#span/3) with `app_name`, `module` and `function` as metadata:
+
+- `[:walex, :event_handler, :start]`
+- `[:walex, :event_handler, :stop]`, with the call's `duration`
+- `[:walex, :event_handler, :exception]`, with `kind`, `reason` and `stacktrace`, when the handler raises. The error is then re-raised, so WalEx's failure handling is unchanged.
 
 ##### Event middleware / Back-pressure
 
