@@ -11,6 +11,7 @@ defmodule WalEx.Replication.Server do
   alias WalEx.Config.Registry, as: WalExRegistry
   alias WalEx.Decoder
   alias WalEx.Decoder.Messages
+  alias WalEx.Events.EventModules
   alias WalEx.Replication.{QueryBuilder, WalTracker}
 
   require Logger
@@ -70,7 +71,7 @@ defmodule WalEx.Replication.Server do
     }
 
     :telemetry.execute([:walex, :replication, :connected], %{}, info)
-    WalEx.Events.EventModules.connected(state.app_name, info)
+    EventModules.connected(state.app_name, info)
 
     query = QueryBuilder.publication_exists(state)
 
@@ -197,7 +198,7 @@ defmodule WalEx.Replication.Server do
   # this the slot's confirmed_flush_lsn can stay pinned on a quiet publication
   # while the database retains WAL. Enabled with `standby_status_interval`.
   @impl true
-  def handle_info(:standby_status, %{streaming?: true} = state) do
+  def handle_info(:standby_status, state = %{streaming?: true}) do
     state = schedule_standby_status(%{state | standby_timer: nil})
     {:noreply, status_update(state), state}
   end
@@ -269,7 +270,7 @@ defmodule WalEx.Replication.Server do
   # publication advance the slot instead of staying pinned at the last commit.
   defp ack_position(%{last_wal_end: 0}), do: nil
 
-  defp ack_position(%{app_name: app_name, last_wal_end: wal_end} = state) do
+  defp ack_position(state = %{app_name: app_name, last_wal_end: wal_end}) do
     if WalEx.Config.get_configs(app_name, :ack_after_processing) do
       case {Map.get(state, :in_txn, false), WalTracker.get(app_name)} do
         {false, _confirmed} -> wal_end + 1
@@ -284,7 +285,7 @@ defmodule WalEx.Replication.Server do
   # Postgrex calls handle_result/2 for queries only, never after a successful
   # START_REPLICATION, so the first replication message is the signal that the
   # stream is up. Status updates may only be sent from then on.
-  defp mark_streaming(%{streaming?: true} = state), do: state
+  defp mark_streaming(state = %{streaming?: true}), do: state
   defp mark_streaming(state), do: schedule_standby_status(%{state | streaming?: true})
 
   defp reset_stream(state) do
@@ -296,7 +297,7 @@ defmodule WalEx.Replication.Server do
   defp track_transaction(state, %Messages.Commit{}), do: %{state | in_txn: false}
   defp track_transaction(state, _message), do: state
 
-  defp schedule_standby_status(%{standby_timer: nil, app_name: app_name} = state) do
+  defp schedule_standby_status(state = %{standby_timer: nil, app_name: app_name}) do
     case WalEx.Config.get_configs(app_name, :standby_status_interval) do
       interval when is_integer(interval) and interval > 0 ->
         %{state | standby_timer: Process.send_after(self(), :standby_status, interval)}
