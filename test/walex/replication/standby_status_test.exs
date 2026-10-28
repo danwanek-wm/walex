@@ -40,6 +40,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
+        standby_token: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: Config.get_configs(app, :standby_status_interval),
         slot_confirmed_lsn: nil,
@@ -50,6 +51,13 @@ defmodule WalEx.Replication.StandbyStatusTest do
   end
 
   defp keepalive(wal_end, reply), do: <<?k, wal_end::64, 0::64, reply::8>>
+
+  # A standby timer message carrying the token the state expects.
+  defp tick(state) do
+    token = make_ref()
+    Server.handle_info({:standby_status, token}, %{state | standby_token: token})
+  end
+
   defp xlog(wal_end, payload), do: <<?w, 0::64, wal_end::64, 0::64, payload::binary>>
   defp ack_lsn([<<?r, lsn::64, _::64, _::64, _::64, _::8>>]), do: lsn
 
@@ -97,7 +105,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
       start_config!(app, [])
 
       assert {:noreply, _msgs, %{standby_timer: nil}} =
-               Server.handle_info(:standby_status, state(app, last_wal_end: 100))
+               tick(state(app, last_wal_end: 100))
     end
 
     test "sends wal_end + 1 and reschedules while streaming" do
@@ -105,7 +113,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
       start_config!(app, standby_status_interval: 60_000)
 
       assert {:noreply, msgs, %{standby_timer: ref}} =
-               Server.handle_info(:standby_status, state(app, last_wal_end: 100))
+               tick(state(app, last_wal_end: 100))
 
       assert ack_lsn(msgs) == 101
       assert is_reference(ref)
@@ -117,7 +125,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
       start_config!(app, standby_status_interval: 60_000)
 
       assert {:noreply, [], %{standby_timer: ref}} =
-               Server.handle_info(:standby_status, state(app))
+               tick(state(app))
 
       assert is_reference(ref)
       Process.cancel_timer(ref)
@@ -128,10 +136,35 @@ defmodule WalEx.Replication.StandbyStatusTest do
       start_config!(app, standby_status_interval: 60_000)
 
       assert {:noreply, %{standby_timer: nil}} =
-               Server.handle_info(
-                 :standby_status,
-                 state(app, streaming?: false, last_wal_end: 5)
-               )
+               tick(state(app, streaming?: false, last_wal_end: 5))
+    end
+
+    test "ignores a timer message from a previous connection" do
+      app = :sb_stale
+      start_config!(app, standby_status_interval: 60_000)
+
+      current_token = make_ref()
+      current_timer = Process.send_after(self(), :never, 60_000)
+
+      st =
+        state(app,
+          last_wal_end: 100,
+          standby_timer: current_timer,
+          standby_token: current_token
+        )
+
+      assert {:noreply, ^st} = Server.handle_info({:standby_status, make_ref()}, st)
+      Process.cancel_timer(current_timer)
+    end
+
+    test "the timer it arms carries the new token" do
+      app = :sb_token
+      start_config!(app, standby_status_interval: 1)
+
+      {:noreply, _msgs, %{standby_token: token}} = tick(state(app, last_wal_end: 100))
+
+      assert is_reference(token)
+      assert_receive {:standby_status, ^token}
     end
   end
 
@@ -146,10 +179,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
       )
 
       assert {:noreply, msgs, %{standby_timer: ref}} =
-               Server.handle_info(
-                 :standby_status,
-                 state(app, last_wal_end: 5_000, confirmed_lsn: 51)
-               )
+               tick(state(app, last_wal_end: 5_000, confirmed_lsn: 51))
 
       assert ack_lsn(msgs) == 5_001
       Process.cancel_timer(ref)
@@ -165,10 +195,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
       )
 
       assert {:noreply, msgs, %{standby_timer: ref}} =
-               Server.handle_info(
-                 :standby_status,
-                 state(app, last_wal_end: 5_000, in_txn: true, confirmed_lsn: 51)
-               )
+               tick(state(app, last_wal_end: 5_000, in_txn: true, confirmed_lsn: 51))
 
       assert ack_lsn(msgs) == 51
       Process.cancel_timer(ref)

@@ -47,6 +47,7 @@ defmodule WalEx.Replication.ServerStreamStateTest do
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
+        standby_token: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: Config.get_configs(app, :standby_status_interval),
         slot_confirmed_lsn: nil,
@@ -58,6 +59,12 @@ defmodule WalEx.Replication.ServerStreamStateTest do
   end
 
   defp keepalive(wal_end, reply), do: <<?k, wal_end::64, 0::64, reply::8>>
+
+  # A standby timer message carrying the token the state expects.
+  defp tick(state) do
+    token = make_ref()
+    Server.handle_info({:standby_status, token}, %{state | standby_token: token})
+  end
 
   defp attach(events) do
     id = "lifecycle-#{System.unique_integer([:positive])}"
@@ -157,10 +164,7 @@ defmodule WalEx.Replication.ServerStreamStateTest do
       start_config!(:lifecycle_app, standby_status_interval: 60_000)
 
       assert {:noreply, %{standby_timer: nil}} =
-               Server.handle_info(
-                 :standby_status,
-                 state(:lifecycle_app, streaming?: false, last_wal_end: 50)
-               )
+               tick(state(:lifecycle_app, streaming?: false, last_wal_end: 50))
     end
   end
 end

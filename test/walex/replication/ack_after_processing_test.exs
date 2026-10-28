@@ -51,6 +51,7 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
         publication: "publication",
         streaming?: true,
         standby_timer: nil,
+        standby_token: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: nil,
         slot_confirmed_lsn: nil,
@@ -64,6 +65,13 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
   end
 
   defp keepalive(wal_end, reply), do: <<?k, wal_end::64, 0::64, reply::8>>
+
+  # A standby timer message carrying the token the state expects.
+  defp tick(state) do
+    token = make_ref()
+    Server.handle_info({:standby_status, token}, %{state | standby_token: token})
+  end
+
   defp xlog(payload), do: <<?w, 0::64, 0::64, 0::64, payload::binary>>
   defp begin_msg(lsn), do: <<?B, lsn::64, 0::64, 1::32>>
   defp commit_msg(lsn), do: <<?C, 0::8, lsn::64, lsn::64, 0::64>>
@@ -150,7 +158,7 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
 
     test "sends no unsolicited periodic update when nothing is safe to report", %{app: app} do
       assert {:noreply, [], _state} =
-               Server.handle_info(:standby_status, state(app, in_txn: true, last_wal_end: 9_999))
+               tick(state(app, in_txn: true, last_wal_end: 9_999))
     end
   end
 

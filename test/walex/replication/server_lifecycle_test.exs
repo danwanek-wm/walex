@@ -58,6 +58,7 @@ defmodule WalEx.Replication.ServerLifecycleTest do
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
+        standby_token: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: Config.get_configs(app, :standby_status_interval),
         slot_confirmed_lsn: nil,

@@ -60,6 +60,7 @@ defmodule WalEx.Replication.Server do
       last_wal_end: 0,
       in_txn: false,
       standby_timer: nil,
+      standby_token: nil,
       slot_confirmed_lsn: nil,
       confirmed_lsn: nil
     }
@@ -211,13 +212,20 @@ defmodule WalEx.Replication.Server do
   # `wal_sender_timeout` is greater than 0 (with 0 it never asks), so without
   # this the slot's confirmed_flush_lsn can stay pinned on a quiet publication
   # while the database retains WAL. Enabled with `standby_status_interval`.
+  # Each timer message carries the token it was armed with. Process.cancel_timer/1
+  # cannot recall a message that has already been delivered, so a message from a
+  # previous connection's timer may still arrive; without the token it would be
+  # mistaken for the current one and start a second timer chain.
   @impl true
-  def handle_info(:standby_status, state = %{streaming?: true}) do
-    state = schedule_standby_status(%{state | standby_timer: nil})
+  def handle_info({:standby_status, token}, state = %{standby_token: token, streaming?: true}) do
+    state = schedule_standby_status(%{state | standby_timer: nil, standby_token: nil})
     {:noreply, status_update(state), state}
   end
 
-  def handle_info(:standby_status, state), do: {:noreply, %{state | standby_timer: nil}}
+  def handle_info({:standby_status, token}, state = %{standby_token: token}),
+    do: {:noreply, %{state | standby_timer: nil, standby_token: nil}}
+
+  def handle_info({:standby_status, _stale_token}, state), do: {:noreply, state}
 
   @impl true
   def handle_info(:check_slot_status, state) do
@@ -335,6 +343,7 @@ defmodule WalEx.Replication.Server do
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
+        standby_token: nil,
         slot_confirmed_lsn: nil,
         confirmed_lsn: nil
     }
@@ -384,7 +393,9 @@ defmodule WalEx.Replication.Server do
 
   defp schedule_standby_status(state = %{standby_timer: nil, standby_status_interval: interval})
        when is_integer(interval) and interval > 0 do
-    %{state | standby_timer: Process.send_after(self(), :standby_status, interval)}
+    token = make_ref()
+    timer = Process.send_after(self(), {:standby_status, token}, interval)
+    %{state | standby_timer: timer, standby_token: token}
   end
 
   defp schedule_standby_status(state), do: state
