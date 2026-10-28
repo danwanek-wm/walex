@@ -57,6 +57,7 @@ defmodule WalEx.Replication.ServerLifecycleTest do
         streaming?: false,
         connects: 0,
         last_wal_end: 0,
+        in_txn: false,
         standby_timer: nil,
         message_middleware: fn _message, _app -> :ok end
       },

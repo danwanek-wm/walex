@@ -46,6 +46,7 @@ defmodule WalEx.Replication.ServerStreamStateTest do
         streaming?: false,
         connects: 0,
         last_wal_end: 0,
+        in_txn: false,
         standby_timer: nil,
         message_middleware: fn _message, _app -> :ok end
       },
@@ -80,13 +81,14 @@ defmodule WalEx.Replication.ServerStreamStateTest do
         state(:lifecycle_app,
           streaming?: true,
           last_wal_end: 99,
+          in_txn: true,
           standby_timer: timer,
           connects: 1
         )
 
       assert {:query, _query, fresh} = Server.handle_connect(stale)
 
-      assert %{streaming?: false, last_wal_end: 0, standby_timer: nil} = fresh
+      assert %{streaming?: false, last_wal_end: 0, in_txn: false, standby_timer: nil} = fresh
       assert Process.read_timer(timer) == false
     end
   end

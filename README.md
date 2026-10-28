@@ -345,6 +345,35 @@ in case the slot is already used `WalEx.Supervisor` will fail to start with a `R
 
 Be warned that there are many additional potential gotchas (a detailed guide is planned).
 
+##### ACK after processing
+
+By default, WalEx acknowledges each WAL position back to Postgres as soon as it is received, regardless of whether your event handlers have finished processing. This is safe and keeps replication lag low, but it means that if your process crashes mid-handler, Postgres has already discarded that WAL segment and the event will not be replayed on reconnect.
+
+For users on a **durable slot** who need stronger delivery guarantees, WalEx can hold back the acknowledgement until after each transaction has been fully handed off to your event handlers:
+
+```elixir
+# config.exs
+
+config :my_app, WalEx,
+  # ...
+  durable_slot: true,          # required — temporary slots lose WAL on reconnect anyway
+  slot_name: :my_app_slot,
+  ack_after_processing: true   # only acknowledge WAL after successful handler dispatch
+```
+
+With this option enabled:
+
+- WAL messages are processed **synchronously** — each transaction blocks the replication connection until `WalEx.Events` has accepted it.
+- The acknowledged LSN reported to Postgres only advances to positions that have been confirmed, so a crash and reconnect will replay any unacknowledged transactions from the durable slot.
+- If no transaction has been confirmed yet (e.g. on first connect), WalEx falls back to acknowledging Postgres's reported position so the initial handshake completes normally.
+
+**Important caveats:**
+
+- `ack_after_processing: true` requires `durable_slot: true`. Enabling it on a temporary slot raises a `RuntimeError` at startup, since temporary slots do not retain WAL across reconnects and the guarantee would be meaningless.
+- "Acknowledged" means the transaction was dispatched to `WalEx.Events` — not that your downstream I/O (database write, HTTP call, etc.) succeeded. For true end-to-end guarantees, write to a durable queue (Oban, Kafka, SQS, etc.) inside your handler and rely on that system's retry semantics.
+- Postgres enforces a [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html) (default 60 s). If your handlers take longer than this, Postgres will disconnect the replication client. On reconnect with a durable slot, WalEx will resume from the last acknowledged position.
+- Holding back ACKs prevents Postgres from advancing the replication slot's LSN. On busy write workloads this increases WAL retention pressure and can degrade autovacuum performance. Monitor the `oldest_active_logical_replication_slot_xid_age` metric (or its AWS RDS equivalent) if you enable this feature in production.
+
 ##### Periodic standby status (`standby_status_interval`)
 
 Postgres asks a replication client for a status update only when `wal_sender_timeout` is greater than `0`, and only after half of that timeout has passed without hearing from the client. If `wal_sender_timeout` is `0` (disabled) it never asks. A client that only answers requests then never reports a flushed position, so the slot's `confirmed_flush_lsn` stays pinned and the database retains WAL indefinitely. This is most visible when the publication covers few tables, because the stream is then mostly keepalives.
@@ -357,7 +386,8 @@ config :my_app, WalEx,
   standby_status_interval: 30_000
 ```
 
-- Each update reports the latest WAL position the server has told WalEx about.
+- Without `ack_after_processing`, each update reports the latest WAL position the server has told WalEx about.
+- With `ack_after_processing`, updates report the last fully processed commit while a transaction is open, and the server's latest position when none is. Dispatch is synchronous in that mode, so a position seen while idle has been fully processed.
 - Updates start with the first message of each connection and stop when the connection drops.
 - It is disabled by default. Alert on `OldestReplicationSlotLag` (AWS) or `pg_replication_slots` retained WAL either way.
 

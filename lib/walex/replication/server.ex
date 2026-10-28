@@ -10,7 +10,8 @@ defmodule WalEx.Replication.Server do
   alias WalEx.Config
   alias WalEx.Config.Registry, as: WalExRegistry
   alias WalEx.Decoder
-  alias WalEx.Replication.QueryBuilder
+  alias WalEx.Decoder.Messages
+  alias WalEx.Replication.{QueryBuilder, WalTracker}
 
   require Logger
 
@@ -51,6 +52,7 @@ defmodule WalEx.Replication.Server do
       streaming?: false,
       connects: 0,
       last_wal_end: 0,
+      in_txn: false,
       standby_timer: nil
     }
 
@@ -170,12 +172,10 @@ defmodule WalEx.Replication.Server do
   @impl true
   def handle_data(<<?w, _wal_start::64, _wal_end::64, _clock::64, rest::binary>>, state) do
     state = mark_streaming(state)
+    message = Decoder.decode_message(rest)
+    state.message_middleware.(message, state.app_name)
 
-    rest
-    |> Decoder.decode_message()
-    |> state.message_middleware.(state.app_name)
-
-    {:noreply, state}
+    {:noreply, track_transaction(state, message)}
   end
 
   @impl true
@@ -257,8 +257,29 @@ defmodule WalEx.Replication.Server do
   end
 
   # The LSN we can safely report as flushed, or nil if there is nothing to say.
+  #
+  # Without ack_after_processing, the server's reported position is acked, as
+  # before.
+  #
+  # With ack_after_processing, only positions whose transactions have been fully
+  # handed to the event handlers are acked, taken from WalTracker. When no
+  # transaction is open, dispatch is synchronous and the server's position
+  # (from a keepalive, which follows all data it covers) has been fully
+  # processed, so it is safe to advance to it. That is what lets a quiet
+  # publication advance the slot instead of staying pinned at the last commit.
   defp ack_position(%{last_wal_end: 0}), do: nil
-  defp ack_position(%{last_wal_end: wal_end}), do: wal_end + 1
+
+  defp ack_position(%{app_name: app_name, last_wal_end: wal_end} = state) do
+    if WalEx.Config.get_configs(app_name, :ack_after_processing) do
+      case {Map.get(state, :in_txn, false), WalTracker.get(app_name)} do
+        {false, _confirmed} -> wal_end + 1
+        {true, 0} -> nil
+        {true, confirmed_lsn} -> confirmed_lsn + 1
+      end
+    else
+      wal_end + 1
+    end
+  end
 
   # Postgrex calls handle_result/2 for queries only, never after a successful
   # START_REPLICATION, so the first replication message is the signal that the
@@ -268,8 +289,12 @@ defmodule WalEx.Replication.Server do
 
   defp reset_stream(state) do
     if state.standby_timer, do: Process.cancel_timer(state.standby_timer)
-    %{state | streaming?: false, last_wal_end: 0, standby_timer: nil}
+    %{state | streaming?: false, last_wal_end: 0, in_txn: false, standby_timer: nil}
   end
+
+  defp track_transaction(state, %Messages.Begin{}), do: %{state | in_txn: true}
+  defp track_transaction(state, %Messages.Commit{}), do: %{state | in_txn: false}
+  defp track_transaction(state, _message), do: state
 
   defp schedule_standby_status(%{standby_timer: nil, app_name: app_name} = state) do
     case WalEx.Config.get_configs(app_name, :standby_status_interval) do

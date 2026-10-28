@@ -95,8 +95,9 @@ defmodule WalEx.ConfigTest do
                event_relay: nil,
                slot_name: "my_app_walex",
                durable_slot: false,
+               ack_after_processing: false,
                standby_status_interval: nil,
-               message_middleware: &Publisher.process_message_async/2
+               message_middleware: &Publisher.dispatch/2
              ] == Config.get_configs(@app_name)
     end
   end
@@ -236,6 +237,47 @@ defmodule WalEx.ConfigTest do
   #              Config.build_module_names(@app_name, modules, subscriptions)
   #   end
   # end
+
+  describe "ack_after_processing config" do
+    test "should default to false" do
+      {:ok, _pid} = Config.start_link(configs: @base_configs)
+      assert false == Config.get_configs(@app_name, :ack_after_processing)
+    end
+
+    test "should be true when durable_slot is also true" do
+      configs =
+        @base_configs
+        |> Keyword.put(:name, :ack_app)
+        |> Keyword.put(:durable_slot, true)
+        |> Keyword.put(:ack_after_processing, true)
+
+      {:ok, _pid} = Config.start_link(configs: configs)
+      assert true == Config.get_configs(:ack_app, :ack_after_processing)
+    end
+
+    test "should raise when ack_after_processing is true but durable_slot is false" do
+      configs =
+        @base_configs
+        |> Keyword.put(:name, :bad_ack_app)
+        |> Keyword.put(:durable_slot, false)
+        |> Keyword.put(:ack_after_processing, true)
+
+      assert_raise RuntimeError,
+                   "ack_after_processing requires durable_slot: true — temporary slots do not retain WAL on reconnect",
+                   fn -> Config.start_link(configs: configs) end
+    end
+
+    test "should raise when ack_after_processing is true and durable_slot is absent" do
+      configs =
+        @base_configs
+        |> Keyword.put(:name, :bad_ack_app2)
+        |> Keyword.put(:ack_after_processing, true)
+
+      assert_raise RuntimeError,
+                   "ack_after_processing requires durable_slot: true — temporary slots do not retain WAL on reconnect",
+                   fn -> Config.start_link(configs: configs) end
+    end
+  end
 
   describe "to_module_name/1" do
     setup do

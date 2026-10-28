@@ -2,7 +2,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
   use ExUnit.Case, async: false
 
   alias WalEx.Config
-  alias WalEx.Replication.Server
+  alias WalEx.Replication.{Server, WalTracker}
 
   @hostname System.get_env("PGHOST", "localhost")
   @username System.get_env("PGUSER", "postgres")
@@ -34,12 +34,13 @@ defmodule WalEx.Replication.StandbyStatusTest do
 
   defp state(app, extra \\ []) do
     Map.merge(
-      %{app_name: app, streaming?: true, last_wal_end: 0, standby_timer: nil},
+      %{app_name: app, streaming?: true, last_wal_end: 0, in_txn: false, standby_timer: nil},
       Map.new(extra)
     )
   end
 
   defp keepalive(wal_end, reply), do: <<?k, wal_end::64, 0::64, reply::8>>
+  defp xlog(wal_end, payload), do: <<?w, 0::64, wal_end::64, 0::64, payload::binary>>
   defp ack_lsn([<<?r, lsn::64, _::64, _::64, _::64, _::8>>]), do: lsn
 
   describe "config" do
@@ -121,6 +122,75 @@ defmodule WalEx.Replication.StandbyStatusTest do
                  :standby_status,
                  state(app, streaming?: false, last_wal_end: 5)
                )
+    end
+  end
+
+  describe "with ack_after_processing" do
+    test "an idle connection advances to the server's position" do
+      app = :sb_ack_idle
+
+      start_config!(app,
+        durable_slot: true,
+        ack_after_processing: true,
+        standby_status_interval: 60_000
+      )
+
+      start_supervised!({WalTracker, app_name: app})
+      WalTracker.update(app, 50)
+
+      assert {:noreply, msgs, %{standby_timer: ref}} =
+               Server.handle_info(:standby_status, state(app, last_wal_end: 5_000))
+
+      assert ack_lsn(msgs) == 5_001
+      Process.cancel_timer(ref)
+    end
+
+    test "an open transaction holds the ack at the confirmed position" do
+      app = :sb_ack_txn
+
+      start_config!(app,
+        durable_slot: true,
+        ack_after_processing: true,
+        standby_status_interval: 60_000
+      )
+
+      start_supervised!({WalTracker, app_name: app})
+      WalTracker.update(app, 50)
+
+      assert {:noreply, msgs, %{standby_timer: ref}} =
+               Server.handle_info(
+                 :standby_status,
+                 state(app, last_wal_end: 5_000, in_txn: true)
+               )
+
+      assert ack_lsn(msgs) == 51
+      Process.cancel_timer(ref)
+    end
+
+    test "a keepalive reply request also advances when idle" do
+      app = :sb_ack_keepalive
+      start_config!(app, durable_slot: true, ack_after_processing: true)
+      start_supervised!({WalTracker, app_name: app})
+      WalTracker.update(app, 50)
+
+      assert {:noreply, msgs, _} = Server.handle_data(keepalive(8_000, 1), state(app))
+      assert ack_lsn(msgs) == 8_001
+    end
+
+    test "BEGIN marks a transaction open and COMMIT closes it" do
+      app = :sb_ack_flag
+      start_config!(app, durable_slot: true, ack_after_processing: true)
+      start_supervised!({WalTracker, app_name: app})
+      message_middleware = fn _msg, _app -> :ok end
+      st = state(app, message_middleware: message_middleware)
+
+      begin = <<?B, 0::64, 0::64, 0::32>>
+      commit = <<?C, 0::8, 0::64, 0::64, 0::64>>
+
+      assert {:noreply, %{in_txn: true}} = Server.handle_data(xlog(10, begin), st)
+
+      assert {:noreply, %{in_txn: false}} =
+               Server.handle_data(xlog(20, commit), %{st | in_txn: true})
     end
   end
 end

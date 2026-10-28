@@ -12,6 +12,7 @@ defmodule WalEx.Replication.Publisher do
   alias WalEx.Casting.Types
   alias WalEx.{Changes, Config, Events}
   alias WalEx.Decoder.Messages
+  alias WalEx.Replication.WalTracker
 
   defmodule State do
     @moduledoc "Publisher state: open transaction plus accumulated relation and type tables."
@@ -50,6 +51,24 @@ defmodule WalEx.Replication.Publisher do
     GenServer.call(name, %{message: message, app_name: app_name}, :infinity)
   end
 
+  @doc """
+  Dispatches a decoded message to the publisher using either sync or async
+  processing, depending on whether `ack_after_processing` is enabled for
+  the given `app_name`.
+
+  When `ack_after_processing: true` the call blocks until the full
+  transaction has been handed off to `WalEx.Events`, ensuring the WAL
+  position is only advanced after successful processing.
+  """
+  @spec dispatch(term(), atom()) :: :ok
+  def dispatch(message, app_name) do
+    if Config.get_configs(app_name, :ack_after_processing) do
+      process_message_sync(message, app_name)
+    else
+      process_message_async(message, app_name)
+    end
+  end
+
   defp registry_name(app_name) do
     Config.Registry.set_name(:set_gen_server, __MODULE__, app_name)
   end
@@ -86,6 +105,7 @@ defmodule WalEx.Replication.Publisher do
        )
        when commit_lsn == current_txn_lsn do
     Events.process(txn, app_name)
+    maybe_confirm_lsn(app_name, commit_lsn)
     state
   end
 
@@ -255,6 +275,12 @@ defmodule WalEx.Replication.Publisher do
   defp process_message(%{message: _message}, state) do
     :noop
     state
+  end
+
+  defp maybe_confirm_lsn(app_name, {xlog_file, xlog_offset}) do
+    if Config.get_configs(app_name, :ack_after_processing) do
+      WalTracker.update(app_name, Bitwise.bsl(xlog_file, 32) + xlog_offset)
+    end
   end
 
   defp data_tuple_to_map(columns, tuple_data) when is_list(columns) and is_tuple(tuple_data) do
