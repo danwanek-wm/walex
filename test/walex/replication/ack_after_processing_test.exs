@@ -2,10 +2,9 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
   use ExUnit.Case, async: false
 
   alias WalEx.Config
-  alias WalEx.Decoder.Messages
   alias WalEx.Events
   alias WalEx.Events.EventModules
-  alias WalEx.Replication.{Publisher, Server, WalTracker}
+  alias WalEx.Replication.{Publisher, Server}
 
   @base_db [
     hostname: "localhost",
@@ -16,6 +15,14 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
     ssl: false,
     ssl_opts: [verify: :verify_none]
   ]
+
+  defmodule OkHandler do
+    def process_all(_txn), do: :ok
+  end
+
+  defmodule RaisingHandler do
+    def process_all(_txn), do: raise("handler failed")
+  end
 
   setup do
     start_supervised!(WalEx.Config.Registry.child_spec())
@@ -35,142 +42,88 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
     {:ok, _pid} = Config.start_link(configs: configs)
   end
 
+  defp state(app, extra \\ []) do
+    Map.merge(
+      %{
+        app_name: app,
+        step: :streaming,
+        slot_name: "ack_slot",
+        publication: "publication",
+        streaming?: true,
+        standby_timer: nil,
+        ack_after_processing: Config.get_configs(app, :ack_after_processing),
+        standby_status_interval: nil,
+        slot_confirmed_lsn: nil,
+        confirmed_lsn: nil,
+        last_wal_end: 0,
+        in_txn: false,
+        message_middleware: Config.get_configs(app, :message_middleware)
+      },
+      Map.new(extra)
+    )
+  end
+
   defp keepalive(wal_end, reply), do: <<?k, wal_end::64, 0::64, reply::8>>
+  defp xlog(payload), do: <<?w, 0::64, 0::64, 0::64, payload::binary>>
+  defp begin_msg(lsn), do: <<?B, lsn::64, 0::64, 1::32>>
+  defp commit_msg(lsn), do: <<?C, 0::8, lsn::64, lsn::64, 0::64>>
 
   defp extract_ack_lsn([<<?r, write_lsn::64, _flush::64, _apply::64, _ts::64, _reply::8>>]),
     do: write_lsn
 
-  # Mirrors the encoding in Publisher.maybe_confirm_lsn/2
-  defp encode_lsn({xlog_file, xlog_offset}), do: Bitwise.bsl(xlog_file, 32) + xlog_offset
-
   describe "Server keepalive acknowledgements" do
-    test "with ack_after_processing true and no confirmed txn, falls back to wal_end + 1" do
-      app = app_name("server_fallback")
-
+    setup do
+      app = app_name("keepalive_#{System.unique_integer([:positive])}")
       start_config!(app, durable_slot: true, ack_after_processing: true)
-      start_supervised!({WalTracker, app_name: app})
+      %{app: app}
+    end
 
-      state = %{
-        app_name: app,
-        streaming?: false,
-        standby_timer: nil,
-        ack_after_processing: Config.get_configs(app, :ack_after_processing),
-        standby_status_interval: nil,
-        slot_confirmed_lsn: nil,
-        last_wal_end: 0,
-        in_txn: false
-      }
-
-      assert {:noreply, messages, %{app_name: ^app}} =
-               Server.handle_data(keepalive(1_000, 1), state)
-
+    test "with no transaction open, reports wal_end + 1", %{app: app} do
+      assert {:noreply, messages, _state} = Server.handle_data(keepalive(1_000, 1), state(app))
       assert 1_001 == extract_ack_lsn(messages)
     end
 
-    test "with ack_after_processing true and confirmed txn, reports confirmed_lsn + 1" do
-      app = app_name("server_confirmed")
-
-      start_config!(app, durable_slot: true, ack_after_processing: true)
-      start_supervised!({WalTracker, app_name: app})
-      WalTracker.update(app, 2_000)
-
-      # A transaction is open, so the server's position is not safe to ack.
-      state = %{
-        app_name: app,
-        streaming?: false,
-        standby_timer: nil,
-        ack_after_processing: Config.get_configs(app, :ack_after_processing),
-        standby_status_interval: nil,
-        slot_confirmed_lsn: nil,
-        last_wal_end: 0,
-        in_txn: true
-      }
-
-      # wal_end is intentionally larger than the confirmed tracker position;
-      # ACK must be driven by the tracker while a transaction is open.
-      assert {:noreply, messages, %{app_name: ^app}} =
-               Server.handle_data(keepalive(9_999, 1), state)
+    test "with a transaction open, reports the last confirmed commit", %{app: app} do
+      # wal_end is intentionally larger than the confirmed position; the ack
+      # must be driven by the confirmed commit while a transaction is open.
+      assert {:noreply, messages, _state} =
+               Server.handle_data(
+                 keepalive(9_999, 1),
+                 state(app, in_txn: true, confirmed_lsn: 2_001)
+               )
 
       assert 2_001 == extract_ack_lsn(messages)
     end
 
-    test "with ack_after_processing false, keeps default wal_end + 1 behaviour" do
-      app = app_name("server_disabled")
-
-      start_config!(app, durable_slot: true, ack_after_processing: false)
-      start_supervised!({WalTracker, app_name: app})
-      # Confirmed tracker value must be ignored when feature is disabled
-      WalTracker.update(app, 42)
-
-      state = %{
-        app_name: app,
-        streaming?: false,
-        standby_timer: nil,
-        ack_after_processing: Config.get_configs(app, :ack_after_processing),
-        standby_status_interval: nil,
-        slot_confirmed_lsn: nil,
-        last_wal_end: 0,
-        in_txn: false
-      }
-
-      assert {:noreply, messages, %{app_name: ^app}} =
-               Server.handle_data(keepalive(5_000, 1), state)
-
-      assert 5_001 == extract_ack_lsn(messages)
+    test "does not send a status update when keepalive reply flag is 0", %{app: app} do
+      assert {:noreply, [], _state} =
+               Server.handle_data(keepalive(9_999, 0), state(app, confirmed_lsn: 124))
     end
 
-    test "does not send a status update when keepalive reply flag is 0" do
-      app = app_name("server_no_reply")
+    test "with ack_after_processing false, ignores confirmed commits" do
+      app = app_name("server_disabled")
+      start_config!(app, durable_slot: true, ack_after_processing: false)
 
-      start_config!(app, durable_slot: true, ack_after_processing: true)
-      start_supervised!({WalTracker, app_name: app})
-      WalTracker.update(app, 123)
+      assert {:noreply, messages, _state} =
+               Server.handle_data(
+                 keepalive(5_000, 1),
+                 state(app, in_txn: true, confirmed_lsn: 42)
+               )
 
-      state = %{
-        app_name: app,
-        streaming?: false,
-        standby_timer: nil,
-        ack_after_processing: Config.get_configs(app, :ack_after_processing),
-        standby_status_interval: nil,
-        slot_confirmed_lsn: nil,
-        last_wal_end: 0,
-        in_txn: false
-      }
-
-      assert {:noreply, [], %{app_name: ^app}} = Server.handle_data(keepalive(9_999, 0), state)
+      assert 5_001 == extract_ack_lsn(messages)
     end
   end
 
   describe "liveness while a transaction is open and nothing is confirmed" do
-    defp open_txn_state(app, extra \\ []) do
-      Map.merge(
-        %{
-          app_name: app,
-          step: :streaming,
-          slot_name: "ack_slot",
-          publication: "publication",
-          streaming?: true,
-          standby_timer: nil,
-          ack_after_processing: true,
-          standby_status_interval: nil,
-          slot_confirmed_lsn: nil,
-          last_wal_end: 0,
-          in_txn: true
-        },
-        Map.new(extra)
-      )
-    end
-
     setup do
       app = app_name("liveness_#{System.unique_integer([:positive])}")
       start_config!(app, durable_slot: true, ack_after_processing: true)
-      start_supervised!({WalTracker, app_name: app})
       %{app: app}
     end
 
     test "answers a reply request with LSN 0 when the slot position is unknown", %{app: app} do
       assert {:noreply, messages, _state} =
-               Server.handle_data(keepalive(9_999, 1), open_txn_state(app))
+               Server.handle_data(keepalive(9_999, 1), state(app, in_txn: true))
 
       assert 0 == extract_ack_lsn(messages)
     end
@@ -179,19 +132,17 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
       assert {:noreply, messages, _state} =
                Server.handle_data(
                  keepalive(9_999, 1),
-                 open_txn_state(app, slot_confirmed_lsn: 4_000)
+                 state(app, in_txn: true, slot_confirmed_lsn: 4_000)
                )
 
       assert 4_000 == extract_ack_lsn(messages)
     end
 
     test "never reports below the slot's confirmed_flush_lsn", %{app: app} do
-      WalTracker.update(app, 100)
-
       assert {:noreply, messages, _state} =
                Server.handle_data(
                  keepalive(9_999, 1),
-                 open_txn_state(app, slot_confirmed_lsn: 4_000)
+                 state(app, in_txn: true, confirmed_lsn: 101, slot_confirmed_lsn: 4_000)
                )
 
       assert 4_000 == extract_ack_lsn(messages)
@@ -199,7 +150,7 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
 
     test "sends no unsolicited periodic update when nothing is safe to report", %{app: app} do
       assert {:noreply, [], _state} =
-               Server.handle_info(:standby_status, open_txn_state(app, last_wal_end: 9_999))
+               Server.handle_info(:standby_status, state(app, in_txn: true, last_wal_end: 9_999))
     end
   end
 
@@ -266,77 +217,48 @@ defmodule WalEx.Replication.AckAfterProcessingTest do
     end
   end
 
-  describe "Publisher confirmation boundary" do
-    test "LSN is not confirmed until the matching COMMIT is processed" do
-      app = app_name("publisher_commit_boundary")
-
-      start_config!(app, durable_slot: true, ack_after_processing: true)
-      start_supervised!({WalTracker, app_name: app})
+  describe "confirming commits through the real pipeline" do
+    defp start_pipeline!(app, handler, extra \\ []) do
+      start_config!(app, [durable_slot: true, modules: [handler]] ++ extra)
       start_supervised!({EventModules, app_name: app})
       start_supervised!({Events, app_name: app})
       start_supervised!({Publisher, app_name: app})
-
-      ts = ~U[2025-01-01 00:00:00Z]
-      lsn = {0, 123}
-      other_lsn = {0, 999}
-
-      begin_msg = %Messages.Begin{final_lsn: lsn, commit_timestamp: ts, xid: 1}
-
-      commit_same_lsn = %Messages.Commit{
-        flags: [],
-        lsn: lsn,
-        end_lsn: lsn,
-        commit_timestamp: ts
-      }
-
-      commit_other_lsn = %Messages.Commit{
-        flags: [],
-        lsn: other_lsn,
-        end_lsn: other_lsn,
-        commit_timestamp: ts
-      }
-
-      # Nothing confirmed before any messages
-      assert 0 == WalTracker.get(app)
-
-      # BEGIN alone must not advance the tracker
-      :ok = Publisher.process_message_sync(begin_msg, app)
-      assert 0 == WalTracker.get(app)
-
-      # A COMMIT whose LSN does not match the open transaction must not advance the tracker
-      :ok = Publisher.process_message_sync(commit_other_lsn, app)
-      assert 0 == WalTracker.get(app)
-
-      # The matching COMMIT must advance the tracker to the encoded LSN
-      :ok = Publisher.process_message_sync(commit_same_lsn, app)
-      assert encode_lsn(lsn) == WalTracker.get(app)
     end
 
-    test "when ack_after_processing is disabled, publisher does not update the wal tracker" do
-      app = app_name("publisher_disabled")
+    test "a commit is confirmed only once its handlers have run" do
+      app = app_name("pipeline_ok")
+      start_pipeline!(app, OkHandler, ack_after_processing: true)
+      lsn = 0x1_0000_0010
 
-      start_config!(app, durable_slot: true, ack_after_processing: false)
-      start_supervised!({WalTracker, app_name: app})
-      start_supervised!({EventModules, app_name: app})
-      start_supervised!({Events, app_name: app})
-      start_supervised!({Publisher, app_name: app})
+      {:noreply, after_begin} = Server.handle_data(xlog(begin_msg(lsn)), state(app))
+      assert %{in_txn: true, confirmed_lsn: nil} = after_begin
 
-      ts = ~U[2025-01-01 00:00:00Z]
-      lsn = {1, 1}
+      {:noreply, after_commit} = Server.handle_data(xlog(commit_msg(lsn)), after_begin)
+      assert %{in_txn: false, confirmed_lsn: confirmed} = after_commit
+      assert confirmed == lsn + 1
+    end
 
-      :ok =
-        Publisher.process_message_sync(
-          %Messages.Begin{final_lsn: lsn, commit_timestamp: ts, xid: 99},
-          app
-        )
+    test "a commit whose handler raises is never confirmed" do
+      app = app_name("pipeline_raise")
+      start_pipeline!(app, RaisingHandler, ack_after_processing: true)
+      lsn = 0x2_0000_0020
 
-      :ok =
-        Publisher.process_message_sync(
-          %Messages.Commit{flags: [], lsn: lsn, end_lsn: lsn, commit_timestamp: ts},
-          app
-        )
+      {:noreply, after_begin} = Server.handle_data(xlog(begin_msg(lsn)), state(app))
 
-      assert 0 == WalTracker.get(app)
+      # The synchronous call chain exits, so Server never gets to record the
+      # commit; in production it crashes and Postgres redelivers.
+      assert catch_exit(Server.handle_data(xlog(commit_msg(lsn)), after_begin))
+    end
+
+    test "with ack_after_processing false, commits are not recorded" do
+      app = app_name("pipeline_disabled")
+      start_pipeline!(app, OkHandler)
+      lsn = 0x3_0000_0030
+
+      {:noreply, after_begin} = Server.handle_data(xlog(begin_msg(lsn)), state(app))
+      {:noreply, after_commit} = Server.handle_data(xlog(commit_msg(lsn)), after_begin)
+
+      assert %{in_txn: false, confirmed_lsn: nil} = after_commit
     end
   end
 end

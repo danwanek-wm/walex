@@ -12,17 +12,15 @@ defmodule WalEx.Replication.Publisher do
   alias WalEx.Casting.Types
   alias WalEx.{Changes, Config, Events}
   alias WalEx.Decoder.Messages
-  alias WalEx.Replication.WalTracker
 
   defmodule State do
     @moduledoc "Publisher state: open transaction plus accumulated relation and type tables."
-    defstruct relations: %{}, transaction: nil, types: %{}, ack_after_processing: false
+    defstruct relations: %{}, transaction: nil, types: %{}
 
     @type t :: %__MODULE__{
             relations: %{optional(non_neg_integer()) => struct()},
             transaction: WalEx.Changes.Transaction.t() | nil,
-            types: %{optional(non_neg_integer()) => struct()},
-            ack_after_processing: boolean()
+            types: %{optional(non_neg_integer()) => struct()}
           }
   end
 
@@ -57,15 +55,10 @@ defmodule WalEx.Replication.Publisher do
   end
 
   @impl true
-  def init(opts) do
+  def init(_opts) do
     Process.flag(:message_queue_data, :off_heap)
 
-    ack_after_processing =
-      opts
-      |> Keyword.get(:app_name)
-      |> Config.get_configs(:ack_after_processing) == true
-
-    {:ok, %State{ack_after_processing: ack_after_processing}}
+    {:ok, %State{}}
   end
 
   @impl true
@@ -93,7 +86,6 @@ defmodule WalEx.Replication.Publisher do
        )
        when commit_lsn == current_txn_lsn do
     Events.process(txn, app_name)
-    maybe_confirm_lsn(state, app_name, commit_lsn)
     state
   end
 
@@ -264,12 +256,6 @@ defmodule WalEx.Replication.Publisher do
     :noop
     state
   end
-
-  defp maybe_confirm_lsn(%State{ack_after_processing: true}, app_name, {xlog_file, xlog_offset}) do
-    WalTracker.update(app_name, Bitwise.bsl(xlog_file, 32) + xlog_offset)
-  end
-
-  defp maybe_confirm_lsn(_state, _app_name, _lsn), do: :ok
 
   defp data_tuple_to_map(columns, tuple_data) when is_list(columns) and is_tuple(tuple_data) do
     columns

@@ -50,6 +50,7 @@ defmodule WalEx.Replication.ServerStreamStateTest do
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: Config.get_configs(app, :standby_status_interval),
         slot_confirmed_lsn: nil,
+        confirmed_lsn: nil,
         message_middleware: fn _message, _app -> :ok end
       },
       Map.new(extra)
@@ -85,7 +86,8 @@ defmodule WalEx.Replication.ServerStreamStateTest do
           last_wal_end: 99,
           in_txn: true,
           standby_timer: timer,
-          slot_confirmed_lsn: 1_234
+          slot_confirmed_lsn: 1_234,
+          confirmed_lsn: 5_678
         )
 
       assert {:query, _query, fresh} = Server.handle_connect(stale)
@@ -95,7 +97,8 @@ defmodule WalEx.Replication.ServerStreamStateTest do
                last_wal_end: 0,
                in_txn: false,
                standby_timer: nil,
-               slot_confirmed_lsn: nil
+               slot_confirmed_lsn: nil,
+               confirmed_lsn: nil
              } = fresh
 
       assert Process.read_timer(timer) == false

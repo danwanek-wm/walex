@@ -2,7 +2,7 @@ defmodule WalEx.Replication.StandbyStatusTest do
   use ExUnit.Case, async: false
 
   alias WalEx.Config
-  alias WalEx.Replication.{Server, WalTracker}
+  alias WalEx.Replication.Server
 
   @hostname System.get_env("PGHOST", "localhost")
   @username System.get_env("PGUSER", "postgres")
@@ -42,7 +42,8 @@ defmodule WalEx.Replication.StandbyStatusTest do
         standby_timer: nil,
         ack_after_processing: Config.get_configs(app, :ack_after_processing),
         standby_status_interval: Config.get_configs(app, :standby_status_interval),
-        slot_confirmed_lsn: nil
+        slot_confirmed_lsn: nil,
+        confirmed_lsn: nil
       },
       Map.new(extra)
     )
@@ -144,11 +145,11 @@ defmodule WalEx.Replication.StandbyStatusTest do
         standby_status_interval: 60_000
       )
 
-      start_supervised!({WalTracker, app_name: app})
-      WalTracker.update(app, 50)
-
       assert {:noreply, msgs, %{standby_timer: ref}} =
-               Server.handle_info(:standby_status, state(app, last_wal_end: 5_000))
+               Server.handle_info(
+                 :standby_status,
+                 state(app, last_wal_end: 5_000, confirmed_lsn: 51)
+               )
 
       assert ack_lsn(msgs) == 5_001
       Process.cancel_timer(ref)
@@ -163,13 +164,10 @@ defmodule WalEx.Replication.StandbyStatusTest do
         standby_status_interval: 60_000
       )
 
-      start_supervised!({WalTracker, app_name: app})
-      WalTracker.update(app, 50)
-
       assert {:noreply, msgs, %{standby_timer: ref}} =
                Server.handle_info(
                  :standby_status,
-                 state(app, last_wal_end: 5_000, in_txn: true)
+                 state(app, last_wal_end: 5_000, in_txn: true, confirmed_lsn: 51)
                )
 
       assert ack_lsn(msgs) == 51
@@ -179,17 +177,16 @@ defmodule WalEx.Replication.StandbyStatusTest do
     test "a keepalive reply request also advances when idle" do
       app = :sb_ack_keepalive
       start_config!(app, durable_slot: true, ack_after_processing: true)
-      start_supervised!({WalTracker, app_name: app})
-      WalTracker.update(app, 50)
 
-      assert {:noreply, msgs, _} = Server.handle_data(keepalive(8_000, 1), state(app))
+      assert {:noreply, msgs, _} =
+               Server.handle_data(keepalive(8_000, 1), state(app, confirmed_lsn: 51))
+
       assert ack_lsn(msgs) == 8_001
     end
 
     test "BEGIN marks a transaction open and COMMIT closes it" do
       app = :sb_ack_flag
       start_config!(app, durable_slot: true, ack_after_processing: true)
-      start_supervised!({WalTracker, app_name: app})
       message_middleware = fn _msg, _app -> :ok end
       st = state(app, message_middleware: message_middleware)
 

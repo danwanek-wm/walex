@@ -12,7 +12,7 @@ defmodule WalEx.Replication.Server do
   alias WalEx.Decoder
   alias WalEx.Decoder.Messages
   alias WalEx.Events.EventModules
-  alias WalEx.Replication.{QueryBuilder, WalTracker}
+  alias WalEx.Replication.QueryBuilder
 
   require Logger
 
@@ -60,7 +60,8 @@ defmodule WalEx.Replication.Server do
       last_wal_end: 0,
       in_txn: false,
       standby_timer: nil,
-      slot_confirmed_lsn: nil
+      slot_confirmed_lsn: nil,
+      confirmed_lsn: nil
     }
 
     Process.flag(:message_queue_data, :off_heap)
@@ -286,24 +287,25 @@ defmodule WalEx.Replication.Server do
   # before.
   #
   # With ack_after_processing, only positions whose transactions have been fully
-  # handed to the event handlers are acked, taken from WalTracker. When no
-  # transaction is open, dispatch is synchronous and the server's position
-  # (from a keepalive, which follows all data it covers) has been fully
-  # processed, so it is safe to advance to it. That is what lets a quiet
-  # publication advance the slot instead of staying pinned at the last commit.
-  # Inside a transaction with nothing confirmed yet (e.g. after a restart), the
-  # slot's own confirmed_flush_lsn, read at connect, is reported: Postgres
-  # already holds that position, so reporting it is always safe.
+  # handed to the event handlers are acked. Dispatch is synchronous in that
+  # mode, so once the middleware returns for a COMMIT, that transaction is done,
+  # and track_transaction/2 records it as confirmed_lsn. When no transaction is
+  # open, the server's position (from a keepalive, which follows all data it
+  # covers) has been fully processed, so it is safe to advance to it. That is
+  # what lets a quiet publication advance the slot instead of staying pinned at
+  # the last commit. Inside a transaction, the last confirmed commit is
+  # reported, or, if there is none yet on this connection, the slot's own
+  # confirmed_flush_lsn read at connect: Postgres already holds that position,
+  # so reporting it is always safe.
   defp ack_position(%{last_wal_end: 0}), do: nil
 
-  defp ack_position(
-         state = %{ack_after_processing: true, app_name: app_name, last_wal_end: wal_end}
-       ) do
-    case {state.in_txn, WalTracker.get(app_name)} do
-      {false, _confirmed} -> wal_end + 1
-      {true, 0} -> state.slot_confirmed_lsn
-      {true, confirmed_lsn} -> max(confirmed_lsn + 1, state.slot_confirmed_lsn || 0)
-    end
+  defp ack_position(%{ack_after_processing: true, in_txn: false, last_wal_end: wal_end}),
+    do: wal_end + 1
+
+  defp ack_position(state = %{ack_after_processing: true}) do
+    [state.confirmed_lsn, state.slot_confirmed_lsn]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.max(fn -> nil end)
   end
 
   defp ack_position(%{last_wal_end: wal_end}), do: wal_end + 1
@@ -323,7 +325,8 @@ defmodule WalEx.Replication.Server do
         last_wal_end: 0,
         in_txn: false,
         standby_timer: nil,
-        slot_confirmed_lsn: nil
+        slot_confirmed_lsn: nil,
+        confirmed_lsn: nil
     }
   end
 
@@ -355,6 +358,17 @@ defmodule WalEx.Replication.Server do
   defp consistent_point(_results), do: nil
 
   defp track_transaction(state, %Messages.Begin{}), do: %{state | in_txn: true}
+
+  # Commit LSN + 1, matching how the server's own position is reported: on
+  # restart Postgres skips transactions whose commit record starts before the
+  # confirmed position.
+  defp track_transaction(
+         state = %{ack_after_processing: true},
+         %Messages.Commit{lsn: {xlog_file, xlog_offset}}
+       ) do
+    %{state | in_txn: false, confirmed_lsn: Bitwise.bsl(xlog_file, 32) + xlog_offset + 1}
+  end
+
   defp track_transaction(state, %Messages.Commit{}), do: %{state | in_txn: false}
   defp track_transaction(state, _message), do: state
 

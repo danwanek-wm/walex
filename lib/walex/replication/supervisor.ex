@@ -11,7 +11,7 @@ defmodule WalEx.Replication.Supervisor do
   use Supervisor
 
   alias WalEx.Config.Registry, as: WalExRegistry
-  alias WalEx.Replication.{Publisher, Server, WalTracker}
+  alias WalEx.Replication.{Publisher, Server}
 
   @doc "Starts the replication supervisor registered under the app name."
   def start_link(opts) do
@@ -28,7 +28,6 @@ defmodule WalEx.Replication.Supervisor do
       |> Keyword.get(:app_name)
 
     children = [
-      {WalTracker, app_name: app_name},
       {Publisher, app_name: app_name},
       {Server, app_name: app_name}
     ]
