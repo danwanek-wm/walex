@@ -54,7 +54,10 @@ defmodule WalEx.Replication.ServerLifecycleTest do
         step: :disconnected,
         slot_name: "lifecycle_slot",
         publication: "publication",
+        streaming?: false,
         connects: 0,
+        last_wal_end: 0,
+        standby_timer: nil,
         message_middleware: fn _message, _app -> :ok end
       },
       Map.new(extra)
